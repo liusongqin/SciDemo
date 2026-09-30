@@ -43,6 +43,7 @@ const toolCount = computed(() => task.value?.tool_calls?.length || events.value.
 const currentTitle = computed(() => task.value ? short(task.value.user_query, 29) : '新的科学计算')
 const selectedPayload = computed(() => JSON.stringify(selected.value?.payload || {}, null, 2))
 const graphEvents = computed(() => events.value.filter(e => ['model_completed','agent_decision','tool_completed','tool_failed','verification_completed','artifact_created','human_review_required','workflow_completed','workflow_failed'].includes(e.event_type)).slice(-16))
+const processEvents = computed(() => events.value.filter(e => ['model_started','model_completed','agent_decision','tool_started','tool_completed','tool_failed','verification_completed','artifact_created','retry_started','human_review_required','human_feedback_received'].includes(e.event_type)))
 const graphNodes = computed(() => graphEvents.value.map((event,index) => {
   const row=Math.floor(index/4), offset=index%4, order=row%2===0?offset:3-offset
   const state=event.event_type.includes('failed') || (event.event_type==='verification_completed'&&!event.payload?.passed) ? 'failed' : event.event_type==='human_review_required' ? 'review' : 'done'
@@ -60,9 +61,29 @@ function eventIcon(type:string){
   if(type.includes('failed')) return '×'
   if(type.includes('completed') || type==='artifact_created') return '✓'
   if(type.includes('tool')) return '⌘'
-  if(type.includes('model')) return '✦'
+  if(type.includes('model') || type==='agent_decision') return '✦'
   if(type.includes('review')) return '◇'
   return '·'
+}
+function renderMarkdown(value:string){ return DOMPurify.sanitize(md.render(value || '')) }
+function processKind(event:AgentEvent){
+  if(event.event_type==='agent_decision'||event.event_type.includes('model')) return 'model'
+  if(event.event_type.includes('tool')) return event.event_type.includes('failed')?'error':'tool'
+  if(event.event_type==='verification_completed') return event.payload?.passed?'verify':'error'
+  if(event.event_type.includes('review')) return 'review'
+  if(event.event_type==='artifact_created') return 'visual'
+  if(event.event_type==='retry_started') return 'retry'
+  return 'system'
+}
+function processLabel(event:AgentEvent){
+  return ({model:'模型决策',tool:'工具调用',verify:'程序验证',error:'异常观察',review:'人工审核',visual:'可视化',retry:'重新规划',system:'系统事件'} as Dict)[processKind(event)]
+}
+function processPayload(event:AgentEvent){
+  let payload:Dict=event.payload || {}
+  if(event.event_type==='tool_completed') payload={tool:payload.tool,arguments:payload.arguments,result:payload.result,duration_ms:payload.duration_ms}
+  if(event.event_type==='artifact_created') payload={title:payload.title,kind:payload.kind,source_tool:payload.source_tool,series:payload.data?.length}
+  const value=JSON.stringify(payload,null,2)
+  return value.length>14000 ? value.slice(0,14000)+'\n…（界面已截断，完整数据保存在任务记录中）' : value
 }
 function selectEvent(item:AgentEvent){ selected.value=item; showInspector.value=true }
 function chooseExample(event:Event){ const item=examples.value.find(e=>e.id===(event.target as HTMLSelectElement).value); if(item) query.value=item.query }
@@ -190,10 +211,22 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller); if(chart
               <div class="message-body">
                 <div class="message-meta"><b>SciAgent</b><span v-if="busy" class="thinking"><i></i> 正在计算</span><span v-else>{{ task.status==='completed'?'已完成':task.status }}</span></div>
 
-                <div v-if="events.length" class="activity-card">
-                  <div class="activity-top"><span class="activity-glyph">⌘</span><div><b>{{ busy ? (events.at(-1)?.title || '正在运行工作流') : '执行记录' }}</b><small>{{ busy ? events.at(-1)?.summary : `${events.length} 个事件 · ${toolCount} 次工具调用` }}</small></div><span class="activity-time">{{ elapsed }}</span></div>
-                  <div class="activity-steps">
-                    <button v-for="event in events.filter(e=>['agent_decision','tool_completed','verification_completed','artifact_created'].includes(e.event_type)).slice(-5)" :key="event.sequence" @click="selectEvent(event)"><i :class="event.event_type">{{ eventIcon(event.event_type) }}</i><span><b>{{ event.title }}</b><small>{{ short(event.summary,60) }}</small></span><em v-if="event.duration_ms">{{ event.duration_ms.toFixed(0) }}ms</em></button>
+                <div v-if="processEvents.length" class="process-wrap">
+                  <div class="process-heading"><div><span>AGENT PROCESS</span><b>运行过程</b></div><em>{{ toolCount }} 次工具调用 · {{ elapsed }}</em></div>
+                  <div class="process-thread">
+                    <section v-for="event in processEvents" :key="event.sequence" class="process-block" :class="processKind(event)">
+                      <button class="process-marker" :aria-label="`查看 ${event.title} 详情`" @click="selectEvent(event)">{{ eventIcon(event.event_type) }}</button>
+                      <div class="process-content">
+                        <div class="process-meta"><span>{{ processLabel(event) }}</span><time>{{ displayTime(event.timestamp) }}</time><em v-if="event.duration_ms">{{ event.duration_ms.toFixed(0) }} ms</em></div>
+                        <h3>{{ event.title }}</h3>
+                        <div class="process-markdown" v-html="renderMarkdown(event.summary)"></div>
+                        <details v-if="Object.keys(event.payload || {}).length">
+                          <summary>{{ processKind(event)==='tool' || processKind(event)==='error' ? '查看输入 / 输出' : '查看结构化证据' }}</summary>
+                          <pre>{{ processPayload(event) }}</pre>
+                        </details>
+                      </div>
+                    </section>
+                    <section v-if="busy" class="process-block active"><span class="process-marker"><i></i></span><div class="process-content"><div class="process-meta"><span>运行中</span></div><h3>{{ events.at(-1)?.title || '等待 Agent 决策' }}</h3><p>{{ events.at(-1)?.summary }}</p></div></section>
                   </div>
                 </div>
 
@@ -202,7 +235,7 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller); if(chart
                   <div><button @click="review('reject')">终止</button><button @click="review('modify')">应用参数</button><button class="approve" @click="review('approve')">批准并继续</button></div>
                 </div>
 
-                <article v-if="task.final_answer" class="markdown-body" v-html="answerHtml"></article>
+                <section v-if="task.final_answer" class="final-response"><div class="response-label"><span>✦</span><b>最终回答</b></div><article class="markdown-body" v-html="answerHtml"></article></section>
 
                 <section v-if="latestArtifact" class="result-chart">
                   <div class="section-title"><div><span>VISUAL OUTPUT</span><h2>{{ latestArtifact.title }}</h2></div><span>Plotly · 交互图</span></div>

@@ -109,7 +109,26 @@ async def agent_decide(state):
     except Exception as exc:
         model=await model_failure(state,"agent_decide","agent_decision",exc); action,record=await model.decide(state["user_query"],state["parsed_problem"],history,suggested_args(state))
     if action.get("action")=="call_tool":
-        action["arguments"]=validate_call(action["name"],action.get("arguments",{})); action.setdefault("id",f"science_call_{current+1}")
+        action.setdefault("id",f"science_call_{current+1}"); raw_arguments=action.get("arguments",{})
+        try:
+            action["arguments"]=validate_call(action["name"],raw_arguments)
+        except Exception as exc:
+            summary=f"安全参数校验拒绝了本次动作：{exc}。Agent 将读取错误并重新生成参数。"
+            failed_call={"id":action["id"],"tool":action.get("name","unknown"),"arguments":raw_arguments,
+                         "result":{"error":str(exc),"stage":"argument_validation"},"duration_ms":0.0}
+            check={"call_id":action["id"],"name":"argument_validation","passed":False,"value":math.inf,
+                   "tolerance":state["tolerance"],"explanation":summary}
+            step={"index":len(state.get("agent_steps",[])),"type":"decision","title":"动作参数被拒绝",
+                  "summary":summary,"status":"failed","tool":action.get("name")}
+            await event(state,"agent_decide","agent_decision","动作参数被安全层拒绝",summary,
+                        {"action":"invalid","tool":action.get("name"),"arguments":raw_arguments,"error":str(exc)},record["duration_ms"])
+            return {"pending_action":{"action":"invalid"},"current_step":current+1,
+                    "tool_calls":[*state.get("tool_calls",[]),failed_call],
+                    "observations":[*state.get("observations",[]),failed_call["result"]],
+                    "verification_results":[*state.get("verification_results",[]),check],
+                    "retry_count":state.get("retry_count",0)+1,
+                    "agent_steps":[*state.get("agent_steps",[]),step],
+                    "model_calls":[*state.get("model_calls",[]),record],"status":"running","error":str(exc)}
         title=f"决定调用 {action['name']}"
     elif action.get("action")=="finish":
         if not any(v.get("passed") for v in state.get("verification_results",[])): raise ValueError("Agent 不能在没有通过程序验证的结果时结束")
@@ -166,7 +185,7 @@ def verify_call(call,tolerance):
         check_name,passed="equation_residual",value<=max(tolerance,float(args.get("tolerance",tolerance)))
     elif name=="solve_symbolic_equation":
         expr,x=safe_expression(result["expression"]),ALLOWED_NAMES[args.get("variable","x")]
-        vals=[abs(complex(expr.evalf(subs={x:safe_expression(v)}))) for v in result["solutions"]]
+        vals=[abs(complex(expr.evalf(subs={x:complex(v["real"],v["imag"])}))) for v in result.get("approximations",[])]
         value,check_name,passed=max(vals,default=math.inf),"symbolic_substitution",max(vals,default=math.inf)<=tolerance
     elif name=="differentiate_expression":
         source,deriv,x=safe_expression(result["source"]),safe_expression(result["expression"]),ALLOWED_NAMES[args["variable"]]
@@ -220,6 +239,7 @@ async def finalize(state):
 
 async def route_decision(state):
     if state.get("status")=="failed" or (state.get("pending_action") or {}).get("action")=="finish": return "finalize"
+    if (state.get("pending_action") or {}).get("action")=="invalid": return "agent_decide"
     if state.get("requires_human_review") and not state.get("review_completed"): return "human_review"
     return "execute_tool"
 async def route_review(state): return "finalize" if state.get("status")=="rejected" else "execute_tool"
@@ -228,7 +248,7 @@ async def route_execute(state): return "agent_decide" if state.get("status")=="t
 builder=StateGraph(ScientificAgentState)
 for name,fn in [("understand_problem",understand_problem),("agent_decide",agent_decide),("human_review",human_review),("execute_tool",execute_tool),("verify_result",verify_result),("render_result",render_result),("finalize",finalize)]: builder.add_node(name,fn)
 builder.add_edge(START,"understand_problem"); builder.add_edge("understand_problem","agent_decide")
-builder.add_conditional_edges("agent_decide",route_decision,{"finalize":"finalize","human_review":"human_review","execute_tool":"execute_tool"})
+builder.add_conditional_edges("agent_decide",route_decision,{"finalize":"finalize","human_review":"human_review","execute_tool":"execute_tool","agent_decide":"agent_decide"})
 builder.add_conditional_edges("human_review",route_review,{"finalize":"finalize","execute_tool":"execute_tool"})
 builder.add_conditional_edges("execute_tool",route_execute,{"agent_decide":"agent_decide","verify_result":"verify_result"})
 builder.add_edge("verify_result","render_result"); builder.add_edge("render_result","agent_decide"); builder.add_edge("finalize",END)

@@ -63,3 +63,25 @@ async def test_agent_can_choose_multiple_tools(monkeypatch):
     assert data["status"]=="completed"
     assert [call["tool"] for call in data["tool_calls"]]==["simplify_expression","evaluate_expression"]
     assert len([event for event in store.events(state["task_id"]) if event["event_type"]=="agent_decision"])==3
+
+@pytest.mark.asyncio
+async def test_invalid_model_arguments_are_returned_for_self_correction(monkeypatch):
+    class SelfCorrectingModel:
+        provider="test"; model="self-correcting"
+        async def analyze(self,query,fallback):
+            record={"stage":"understand","provider":"test","model":self.model,"duration_ms":0,"response_summary":"ok"}
+            return {**fallback,"decision_summary":"开始"},record
+        async def decide(self,query,parsed,history,suggested):
+            record={"stage":"agent_decision","provider":"test","model":self.model,"duration_ms":0,"response_summary":"next"}
+            if not history:
+                return {"action":"call_tool","id":"bad","name":"solve_symbolic_equation","arguments":{"expression":"这不是表达式","variable":"x"},"decision_summary":"首次尝试"},record
+            if len(history)==1:
+                assert history[0]["result"]["stage"]=="argument_validation"
+                return {"action":"call_tool","id":"fixed","name":"solve_symbolic_equation","arguments":{"expression":"x^2-2","variable":"x"},"decision_summary":"修正参数"},record
+            return {"action":"finish","answer":"修正后完成。","decision_summary":"结束"},record
+    monkeypatch.setattr(workflow,"model_for",lambda state:SelfCorrectingModel())
+    state=initial("求解方程")
+    await run_task(state,state["task_id"])
+    data=store.get(state["task_id"])
+    assert data["status"]=="completed" and len(data["tool_calls"])==2
+    assert data["tool_calls"][0]["result"]["stage"]=="argument_validation"

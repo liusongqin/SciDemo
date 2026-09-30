@@ -77,7 +77,12 @@ def integrate_expression(expression: str, variable="x", lower=None, upper=None):
 
 def solve_symbolic_equation(expression: str, variable="x"):
     expr=safe_expression(expression); sols=sp.solve(expr, ALLOWED_NAMES[variable])
-    return {"solutions": [str(s) for s in sols], "latex": [sp.latex(s) for s in sols], "expression": str(expr)}
+    approximations=[]
+    for solution in sols:
+        value=complex(sp.N(solution,30))
+        approximations.append({"real":float(value.real),"imag":float(value.imag)})
+    return {"solutions": [str(s) for s in sols], "latex": [sp.latex(s) for s in sols],
+            "approximations":approximations,"expression": str(expr)}
 
 def solve_symbolic_system(expressions: list[str], variables: list[str]):
     if not 1 <= len(expressions) <= 4 or len(variables)>4: raise ValueError("方程组限 1 到 4 个方程/变量")

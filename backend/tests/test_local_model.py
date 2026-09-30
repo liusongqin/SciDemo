@@ -39,6 +39,10 @@ def test_untrusted_tool_arguments():
     with pytest.raises(ValueError): validate_call('find_root',{'expression':'x','method':'newton','tolerance':1e-8,'file':'/tmp/a'})
     with pytest.raises(ValueError): validate_call('solve_ode',{'rhs':'y','y0':0,'t_span':[2,1]})
 
+def test_model_function_definition_is_normalized():
+    result=validate_call('solve_symbolic_equation',{'expression':'f(x) = x^3 - 3*x + 1','variable':'x'})
+    assert result['expression']=='x^3 - 3*x + 1'
+
 @pytest.mark.asyncio
 async def test_model_failure_is_not_success(monkeypatch):
     class Unavailable:

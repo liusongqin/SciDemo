@@ -1,5 +1,5 @@
 import pytest
-from app.science import TOOLS, safe_expression, find_root, differentiate_expression, interpolate_data, fit_curve
+from app.science import TOOLS, safe_expression, find_root, differentiate_expression, interpolate_data, fit_curve, solve_symbolic_equation
 
 def test_safe_expression_rejects_code():
     with pytest.raises(ValueError): safe_expression("__import__('os').system('id')")
@@ -10,6 +10,11 @@ def test_newton_root_is_verified():
 
 def test_symbolic_derivative():
     assert differentiate_expression("x^2")["expression"]=="2*x"
+
+def test_cubic_symbolic_roots_include_verifiable_approximations():
+    result=solve_symbolic_equation("x^3-3*x+1")
+    assert len(result["solutions"])==3 and len(result["approximations"])==3
+    assert max(abs(v["real"]**3-3*v["real"]+1) for v in result["approximations"])<1e-12
 
 def test_interpolation_nodes():
     assert interpolate_data([0,1,2],[0,1,0])["node_error"]<1e-12

@@ -1,9 +1,22 @@
 """Server-side validation; model schemas are guidance, never authorization."""
 import math
+import re
 from .llm import TOOL_SPECS
 from .science import safe_expression, RootInput
 
 def validate_call(name: str, arguments: dict) -> dict:
+    arguments=dict(arguments)
+    arguments.pop('decision_summary',None)
+    for key in ('expression','rhs'):
+        value=arguments.get(key)
+        if not isinstance(value,str): continue
+        value=value.strip().replace('＝','=')
+        definition=re.fullmatch(r'[A-Za-z]\s*\(\s*[xyzt]\s*\)\s*=\s*(.+)',value)
+        if definition:
+            value=definition.group(1).strip()
+        elif '=' in value and value.count('=')==1:
+            left,right=value.split('=',1); value=f'({left.strip()})-({right.strip()})'
+        arguments[key]=value
     specs={s['function']['name']:s['function']['parameters'] for s in TOOL_SPECS}
     if name not in specs: raise ValueError('未注册的工具')
     schema=specs[name]

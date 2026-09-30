@@ -20,6 +20,12 @@ TOOL_SPECS = [
  {"type":"function","function":{"name":"numerical_integral","description":"在有限区间上计算定积分并做独立梯形交叉检查。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"lower":{"type":"number"},"upper":{"type":"number"},"variable":{"type":"string","enum":["x","y","z","t"]}},"required":["expression","lower","upper","variable"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"plot_function","description":"绘制只含一个自变量的解析函数。expression 只能包含 variable 指定的变量；求根、插值、拟合和 ODE 工具会自动生成结果图，不要再用本工具绘制它们的结果。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},"variable":{"type":"string","enum":["x","y","z","t"]},"samples":{"type":"integer"}},"required":["expression","start","end","variable"],"additionalProperties":False}}},
 ]
+# Every tool call may carry a short public rationale for the trace UI. It is
+# removed before server-side validation/execution and is not hidden chain of thought.
+for _spec in TOOL_SPECS:
+    _spec["function"]["parameters"]["properties"]["decision_summary"]={
+        "type":"string","description":"用 Markdown 写一句可公开展示的选择理由，不含隐藏思维链"
+    }
 TOOL_NAMES={item["function"]["name"] for item in TOOL_SPECS}
 
 class ModelAdapter(Protocol):
@@ -131,7 +137,7 @@ class OpenAICompatibleModel:
 初始任务理解: {json.dumps(parsed,ensure_ascii=False)}
 已有工具观察: {json.dumps(compact,ensure_ascii=False)}
 精度参考: {suggested.get('tolerance',1e-8)}
-若需要继续，请调用一个最合适的工具。若任务已完成，请直接输出最终答案，不要调用工具。"""
+若需要继续，请调用一个最合适的工具，并在 decision_summary 参数中写一句可公开展示的 Markdown 决策说明。若任务已完成，请直接输出最终答案，不要调用工具。"""
         messages=[SystemMessage(content="你控制科学计算工作流。工具白名单和程序验证是不可绕过的安全边界。"),HumanMessage(content=query)]
         for item in history[-2:]:
             call_id=item.get("id") or "science_call"
@@ -143,8 +149,10 @@ class OpenAICompatibleModel:
             if len(msg.tool_calls)!=1: raise ValueError("每轮只允许模型调用一个工具")
             item=msg.tool_calls[0]
             if item["name"] not in TOOL_NAMES: raise ValueError(f"模型选择了未注册工具: {item['name']}")
+            args=dict(item.get("args",{})); public_summary=str(args.pop("decision_summary","")).strip()
+            visible_content=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content or "")).strip()
             action={"action":"call_tool","id":item.get("id") or f"science_call_{len(history)+1}","name":item["name"],
-                    "arguments":item.get("args",{}),"decision_summary":f"模型决定调用 {item['name']}"}
+                    "arguments":args,"decision_summary":public_summary or visible_content[:600] or f"模型决定调用 `{item['name']}` 继续求解。"}
         else:
             answer=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip()
             if not answer: raise ValueError("模型既未调用工具，也未给出最终答案")
