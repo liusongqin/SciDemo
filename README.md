@@ -1,1 +1,99 @@
-# SciDemo
+# SciDemo：科学计算 Agent 教学工作流
+
+SciDemo 是一个本地模型驱动的科学计算教学系统。默认连接本机 vLLM：模型理解问题、生成真实函数调用，SymPy/SciPy/NumPy 执行计算，验证器检查结果，最后模型读取工具返回消息并解释。网页可关闭“调用本地 Qwen 模型”使用离线 Mock。
+
+## 架构
+
+```text
+backend/app/
+  main.py       FastAPI、SSE、任务与人工审核 API
+  workflow.py   LangGraph 节点、条件分支、interrupt/resume
+  science.py    AST 白名单解析、符号/数值工具、Plotly artifacts
+  storage.py    SQLite 任务快照与有序事件历史
+  llm.py        Mock 与 OpenAI-compatible/vLLM 模型适配器
+frontend/src/   React + TypeScript + React Flow + KaTeX + Plotly
+backend/tests/  工具、安全、闭环、重试、人工恢复测试
+```
+
+每个任务拥有 UUID `thread_id`。LangGraph 使用 checkpointer 支持运行时中断；SQLite 保存可序列化任务快照和稳定递增的事件序号，浏览器刷新后通过 `GET /api/tasks/{id}` 恢复。页面展示决策摘要和结构化输入输出，不展示隐藏推理。
+
+## 安装与运行
+
+要求 Python 3.11+、uv、Node.js 20+。
+
+```bash
+uv sync --inexact
+npm --prefix frontend install
+cp .env.example .env
+chmod +x scripts/start.sh scripts/dev.sh scripts/serve-model.sh
+./scripts/start.sh
+```
+
+打开 <http://127.0.0.1:5173>。API 文档位于 <http://127.0.0.1:8000/docs>。也可分别启动：
+
+前端和 Agent API 默认监听所有网卡，局域网设备可通过 `http://服务器局域网IP:5173` 访问；vLLM 仍只监听本机回环地址，避免直接暴露模型端口。
+
+```bash
+uv run uvicorn app.main:app --app-dir backend --reload --port 8000
+npm --prefix frontend run dev
+```
+
+## 模型模式
+
+默认连接 `http://127.0.0.1:8001/v1`。vLLM 与后端统一安装在项目 `.venv`；安装时由 uv 根据显卡驱动选择 PyTorch/CUDA：
+
+```bash
+uv pip install --python .venv/bin/python "vllm[bench]==0.30.0" --torch-backend=auto
+bash scripts/serve-model.sh
+```
+
+启动脚本使用现有 `models/Qwen3.5-9B`、两卡张量并行、16384 上下文，并启用 Qwen3 XML 工具调用解析。`scripts/start.sh` 会等待模型就绪后再启动后端与可视化前端；已有模型服务时会直接复用。工具调用配置参考 [vLLM 官方文档](https://docs.vllm.ai/en/stable/features/tool_calling/)。应用配置为：
+
+```text
+LLM_PROVIDER=openai-compatible
+LLM_MODEL=Qwen3.5-9B
+LLM_BASE_URL=http://127.0.0.1:8001/v1
+LLM_API_KEY=local
+```
+
+`.env` 在后端启动时自动加载。模型不可用会明确失败；只有显式设置 `LLM_FALLBACK_TO_MOCK=true` 才允许回退，并产生回退事件。离线测试使用 `use_local_model=false`。密钥只放 `.env`，不要提交。
+
+## 课堂演示
+
+1. 启动 vLLM 和前后端，查看右上角模型连接状态。
+2. 选择 Newton 示例并勾选教学审核模式，运行后观察模型理解事件。
+3. 点击规划节点，检查模型生成的工具名、调用参数和调用 ID，批准计划。
+4. 查看工具返回值、独立残差检查和模型解释。模型收到标准 `assistant.tool_calls → tool` 消息。
+5. 选择失败重试示例，观察验证失败后重新规划；该例的第一次失败为显式教学注入。
+
+“本地模型调用”面板展示调用阶段、模型、耗时与公开摘要。工具 schema、模型选择、执行结果和验证证据可从事件检查器查看。自由文本的表达式和参数由本地模型提取，Mock 的规则参数不会覆盖模型产生的参数。
+
+## API
+
+- `POST /api/tasks`：提交问题、教学模式、容差和最大重试次数。
+- `GET /api/tasks/{task_id}`：任务状态及完整事件历史。
+- `GET /api/tasks/{task_id}/events?after=N`：SSE 增量事件。
+- `POST /api/tasks/{task_id}/review`：在同一任务上 `approve`、`modify` 或 `reject`。
+- `GET /api/examples`：七个课堂案例。
+- `GET /api/model/status`：检查本地模型服务与模型列表。
+
+审核修改示例：`{"action":"modify","parameters":{"tolerance":1e-10},"comment":"提高精度"}`。
+
+## 验证
+
+```bash
+uv run pytest -q
+npm --prefix frontend run build
+```
+
+测试覆盖表达式注入拒绝、Newton 求根、符号求导、插值、拟合、Mock 端到端、验证失败重试、人工暂停/恢复，以及模拟 OpenAI-compatible HTTP 的真实适配器协议测试：模型返回函数调用、工具执行、ToolMessage 回传。协议测试不等同于真实 GPU 推理测试。
+
+## 安全边界与当前限制
+
+- 不执行用户 Python，不调用字符串 `eval`/`exec`；表达式只允许 `x/y/z/t`、数值、基本运算及白名单数学函数。
+- 表达式复杂度、数组长度、绘图点数、重试次数和求解迭代次数均有限制。
+- 工具不访问网络或任意文件；图表以 JSON 数据返回，不生成任意路径文件。
+- 本地模型可调用七种注册工具；每次计划执行一个工具，验证失败后可重新规划。尚不支持任意多工具依赖链。Mock 使用固定案例路由。
+- LangGraph checkpointer 当前在内存中，后端重启后未完成的人工中断不能继续；SQLite 历史及完成结果仍可读取。
+- 工具执行目前在后端进程中；表达式限制并不等同于进程隔离，适用于可信本地课堂环境。
+- Plotly 完整包令生产 bundle 较大；正式部署可按需加载图表模块。

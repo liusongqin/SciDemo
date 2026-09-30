@@ -1,0 +1,26 @@
+[project]
+name = "scidemo"
+version = "0.1.0"
+description = "Agent workflow demonstration for scientific computing education"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.9",
+  "langgraph>=0.2",
+  "langchain-openai>=0.3",
+  "sympy>=1.13",
+  "numpy>=2.0",
+  "scipy>=1.14",
+  "matplotlib>=3.9",
+  "python-dotenv>=1.0",
+  "httpx>=0.28",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "httpx>=0.28"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+testpaths = ["backend/tests"]
+asyncio_mode = "auto"
