@@ -18,6 +18,11 @@ def validate_call(name: str, arguments: dict) -> dict:
         if t=='array':
             if not isinstance(value,list) or not 2<=len(value)<=500: raise ValueError('数组长度须为 2–500')
             for item in value: check(item,spec['items'])
+        if t=='object':
+            if not isinstance(value,dict): raise ValueError('参数必须为对象')
+            if not set(value).issubset({'x','y','z','t'}): raise ValueError('变量名不在允许范围中')
+            if not all(isinstance(item,(int,float)) and not isinstance(item,bool) and math.isfinite(item) for item in value.values()):
+                raise ValueError('变量值必须为有限数值')
         if 'enum' in spec and value not in spec['enum']: raise ValueError('参数不在允许值中')
     for key,value in arguments.items():
         check(value,schema['properties'][key])

@@ -16,6 +16,9 @@ class ScientificAgentState(TypedDict, total=False):
     messages: list[dict[str, Any]]
     model_calls: list[dict[str, Any]]
     model_provider: str
+    agent_steps: list[dict[str, Any]]
+    pending_action: dict[str, Any] | None
+    review_completed: bool
     use_local_model: bool
     status: str
     requires_human_review: bool

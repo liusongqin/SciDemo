@@ -1,17 +1,17 @@
 # SciDemo：科学计算 Agent 教学工作流
 
-SciDemo 是一个本地模型驱动的科学计算教学系统。默认连接本机 vLLM：模型理解问题、生成真实函数调用，SymPy/SciPy/NumPy 执行计算，验证器检查结果，最后模型读取工具返回消息并解释。网页可关闭“调用本地 Qwen 模型”使用离线 Mock。
+SciDemo 是一个本地模型驱动的科学计算教学系统。默认连接本机 vLLM：模型在循环中自主决定调用哪些工具、是否根据观察继续计算以及何时结束，SymPy/SciPy/NumPy 执行计算，独立验证器检查每次结果。网页可关闭“调用本地 Qwen 模型”使用离线 Mock。
 
 ## 架构
 
 ```text
 backend/app/
   main.py       FastAPI、SSE、任务与人工审核 API
-  workflow.py   LangGraph 节点、条件分支、interrupt/resume
+  workflow.py   模型驱动的 decide → tool → verify → observe 循环、interrupt/resume
   science.py    AST 白名单解析、符号/数值工具、Plotly artifacts
   storage.py    SQLite 任务快照与有序事件历史
   llm.py        Mock 与 OpenAI-compatible/vLLM 模型适配器
-frontend/src/   React + TypeScript + React Flow + KaTeX + Plotly
+frontend/src/   Vue 3 + TypeScript + Markdown/KaTeX + Plotly + 实时工作流图
 backend/tests/  工具、安全、闭环、重试、人工恢复测试
 ```
 
@@ -62,8 +62,8 @@ LLM_API_KEY=local
 
 1. 启动 vLLM 和前后端，查看右上角模型连接状态。
 2. 选择 Newton 示例并勾选教学审核模式，运行后观察模型理解事件。
-3. 点击规划节点，检查模型生成的工具名、调用参数和调用 ID，批准计划。
-4. 查看工具返回值、独立残差检查和模型解释。模型收到标准 `assistant.tool_calls → tool` 消息。
+3. 点击动态决策节点，检查模型生成的工具名、调用参数和调用 ID，批准首个动作。
+4. 在聊天中的工具记录或右侧执行图点击节点，查看工具返回值、独立残差检查和模型解释。模型收到标准 `assistant.tool_calls → tool` 消息。
 5. 选择失败重试示例，观察验证失败后重新规划；该例的第一次失败为显式教学注入。
 
 “本地模型调用”面板展示调用阶段、模型、耗时与公开摘要。工具 schema、模型选择、执行结果和验证证据可从事件检查器查看。自由文本的表达式和参数由本地模型提取，Mock 的规则参数不会覆盖模型产生的参数。
@@ -93,7 +93,7 @@ npm --prefix frontend run build
 - 不执行用户 Python，不调用字符串 `eval`/`exec`；表达式只允许 `x/y/z/t`、数值、基本运算及白名单数学函数。
 - 表达式复杂度、数组长度、绘图点数、重试次数和求解迭代次数均有限制。
 - 工具不访问网络或任意文件；图表以 JSON 数据返回，不生成任意路径文件。
-- 本地模型可调用七种注册工具；每次计划执行一个工具，验证失败后可重新规划。尚不支持任意多工具依赖链。Mock 使用固定案例路由。
+- 本地模型可在受控循环中连续调用注册工具，并根据每轮工具观察与验证证据更换工具、修改参数或结束；单轮仅允许一个工具调用，总工具步数受 `MAX_TOOL_STEPS` 限制。Mock 使用确定性决策器。
 - LangGraph checkpointer 当前在内存中，后端重启后未完成的人工中断不能继续；SQLite 历史及完成结果仍可读取。
 - 工具执行目前在后端进程中；表达式限制并不等同于进程隔离，适用于可信本地课堂环境。
 - Plotly 完整包令生产 bundle 较大；正式部署可按需加载图表模块。

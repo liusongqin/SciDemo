@@ -4,6 +4,7 @@ from httpx import ASGITransport, AsyncClient
 from langgraph.types import Command
 from app.main import app
 from app.storage import store
+from app import workflow
 from app.workflow import run_task
 
 def initial(query: str, review=False):
@@ -40,3 +41,25 @@ async def test_human_review_pause_resume_same_thread():
     assert store.get(state["task_id"])["status"]=="waiting_review"
     await run_task(Command(resume={"action":"approve","parameters":{}}),state["task_id"])
     assert store.get(state["task_id"])["status"]=="completed"
+
+@pytest.mark.asyncio
+async def test_agent_can_choose_multiple_tools(monkeypatch):
+    class MultiStepModel:
+        provider="test"; model="multi-step-controller"
+        async def analyze(self,query,fallback):
+            record={"stage":"understand","provider":"test","model":self.model,"duration_ms":0,"response_summary":"ok"}
+            return {**fallback,"decision_summary":"需要分两步计算"},record
+        async def decide(self,query,parsed,history,suggested):
+            record={"stage":"agent_decision","provider":"test","model":self.model,"duration_ms":0,"response_summary":"next"}
+            if not history:
+                return {"action":"call_tool","id":"step_1","name":"simplify_expression","arguments":{"expression":"x+x"},"decision_summary":"先化简"},record
+            if len(history)==1:
+                return {"action":"call_tool","id":"step_2","name":"evaluate_expression","arguments":{"expression":"2*x","values":{"x":3}},"decision_summary":"再计算数值"},record
+            return {"action":"finish","answer":"两步工具计算完成并通过验证。","decision_summary":"证据充分，结束"},record
+    monkeypatch.setattr(workflow,"model_for",lambda state:MultiStepModel())
+    state=initial("先化简 x+x，再计算 x=3 时的值")
+    await run_task(state,state["task_id"])
+    data=store.get(state["task_id"])
+    assert data["status"]=="completed"
+    assert [call["tool"] for call in data["tool_calls"]]==["simplify_expression","evaluate_expression"]
+    assert len([event for event in store.events(state["task_id"]) if event["event_type"]=="agent_decision"])==3

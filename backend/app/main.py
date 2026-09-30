@@ -39,7 +39,8 @@ async def examples(): return EXAMPLES
 async def create_task(body: TaskCreate):
     task_id=str(uuid.uuid4())
     state: ScientificAgentState={"task_id":task_id,"user_query":body.query,"parsed_problem":{},"computation_mode":"",
-      "plan":[],"current_step":0,"tool_calls":[],"observations":[],"verification_results":[],"artifacts":[],"messages":[],"model_calls":[],
+      "plan":[],"current_step":0,"agent_steps":[],"pending_action":None,"review_completed":False,
+      "tool_calls":[],"observations":[],"verification_results":[],"artifacts":[],"messages":[],"model_calls":[],
       "status":"queued","requires_human_review":body.require_review,"human_feedback":None,"retry_count":0,
       "max_retries":body.max_retries,"tolerance":body.tolerance,"teaching_mode":body.teaching_mode,"use_local_model":body.use_local_model,
       "model_provider":"local-vllm" if body.use_local_model and settings.llm_provider.lower()!="mock" else "mock","final_answer":None,"error":None}

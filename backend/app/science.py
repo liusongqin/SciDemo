@@ -159,10 +159,14 @@ def plot_artifact(kind: str, result: dict[str,Any]):
 
 def plot_function(expression: str, start=-5.0, end=5.0, variable="x", samples=400):
     if not start < end: raise ValueError("绘图区间必须递增")
-    xs=np.linspace(start,end,min(max(samples,2),MAX_POINTS)); fn=sp.lambdify(ALLOWED_NAMES[variable],safe_expression(expression),"numpy")
+    expr=safe_expression(expression); unexpected=expr.free_symbols-{ALLOWED_NAMES[variable]}
+    if unexpected: raise ValueError(f"绘图表达式包含未赋值变量: {', '.join(sorted(str(item) for item in unexpected))}")
+    xs=np.linspace(start,end,min(max(samples,2),MAX_POINTS)); fn=sp.lambdify(ALLOWED_NAMES[variable],expr,"numpy")
     ys=np.asarray(fn(xs),dtype=float); ys=np.broadcast_to(ys,xs.shape)
     finite=np.isfinite(ys)
     return {"kind":"plotly","title":"函数曲线","data":[{"type":"scatter","mode":"lines","x":xs[finite].tolist(),"y":ys[finite].tolist(),"name":expression}],"layout":{}}
+
+TOOLS["plot_function"] = plot_function
 
 def plot_root_iterations(result: dict[str,Any]): return plot_artifact("root",result)
 def plot_interpolation(result: dict[str,Any]): return plot_artifact("interpolation",result)

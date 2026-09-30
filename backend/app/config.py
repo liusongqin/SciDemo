@@ -14,7 +14,7 @@ class Settings(BaseModel):
     timeout_seconds: int = int(os.getenv("TASK_TIMEOUT_SECONDS", "60"))
     max_tool_steps: int = int(os.getenv("MAX_TOOL_STEPS", "12"))
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
-    llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "800"))
+    llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "512"))
     llm_fallback_to_mock: bool = os.getenv("LLM_FALLBACK_TO_MOCK", "false").lower()=="true"
 
 settings = Settings()
