@@ -35,3 +35,6 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Model checkpoints and logs
+models/
