@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import MarkdownIt from 'markdown-it'
 import { katex } from '@mdit/plugin-katex'
 import DOMPurify from 'dompurify'
+import PlotlyChart from './components/PlotlyChart.vue'
 
 type Dict = Record<string, any>
 type AgentEvent = { task_id:string; sequence:number; timestamp:string; event_type:string; node?:string; title:string; summary:string; payload:Dict; duration_ms?:number }
@@ -23,15 +24,13 @@ const retries = ref(2)
 const busy = ref(false)
 const showSettings = ref(false)
 const showInspector = ref(false)
-const chartEl = ref<HTMLElement|null>(null)
 const composer = ref<HTMLTextAreaElement|null>(null)
 let source: EventSource|null = null
 let poller: number|undefined
-let plotly: any = null
 
 const taskDone = computed(() => ['completed','failed','rejected'].includes(task.value?.status || ''))
 const modelOnline = computed(() => Boolean(modelStatus.value?.available))
-const latestArtifact = computed(() => task.value?.artifacts?.at(-1))
+const latestVerification = computed(() => task.value?.verification_results?.at(-1))
 const answerHtml = computed(() => DOMPurify.sanitize(md.render(task.value?.final_answer || '')))
 const elapsed = computed(() => {
   if (!events.value.length) return '—'
@@ -56,6 +55,7 @@ const graphEdges = computed(() => graphNodes.value.slice(1).map((node,index) => 
 const graphHeight = computed(() => Math.max(125,Math.ceil(Math.max(1,graphNodes.value.length)/4)*112))
 
 function short(value:string, length=48){ return value.length > length ? value.slice(0,length)+'…' : value }
+function scientific(value:unknown){ const number=Number(value); return value!==null && value!=='' && Number.isFinite(number) ? number.toExponential(3) : '不可用' }
 function displayTime(value:string){ return new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(value)) }
 function eventIcon(type:string){
   if(type.includes('failed')) return '×'
@@ -117,10 +117,12 @@ async function restore(id:string){
 }
 async function run(){
   if(query.value.trim().length<3 || busy.value)return
+  const submitted=query.value.trim()
   busy.value=true; task.value=null; events.value=[]; selected.value=null
   try{
-    const data=await api<{task_id:string}>('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:query.value.trim(),teaching_mode:teaching.value,require_review:teaching.value,use_local_model:useModel.value,tolerance:tolerance.value,max_retries:retries.value})})
+    const data=await api<{task_id:string}>('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:submitted,teaching_mode:teaching.value,require_review:teaching.value,use_local_model:useModel.value,tolerance:tolerance.value,max_retries:retries.value})})
     localStorage.setItem('scidemo-task',data.task_id)
+    query.value=''; await nextTick(); resizeComposer()
     await refresh(data.task_id); listen(data.task_id)
   }catch(error){
     busy.value=false
@@ -137,17 +139,6 @@ async function review(action:'approve'|'modify'|'reject'){
 function newChat(){ source?.close(); task.value=null; events.value=[]; selected.value=null; busy.value=false; localStorage.removeItem('scidemo-task'); nextTick(()=>composer.value?.focus()) }
 function onComposerKey(e:KeyboardEvent){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); run() } }
 
-async function renderChart(){
-  await nextTick()
-  if(!chartEl.value || !latestArtifact.value)return
-  plotly ||= (await import('plotly.js-dist-min')).default
-  const styles=getComputedStyle(document.documentElement)
-  const fg=styles.getPropertyValue('--text').trim(), grid=styles.getPropertyValue('--line').trim(), accent=styles.getPropertyValue('--cyan').trim()
-  const data=(latestArtifact.value.data || []).map((series:Dict,index:number)=>({...series,line:{...(series.line||{}),color:index===0?accent:undefined},marker:{...(series.marker||{}),color:index===0?accent:undefined}}))
-  await plotly.react(chartEl.value,data,{...(latestArtifact.value.layout||{}),autosize:true,height:292,margin:{l:54,r:20,t:12,b:44},paper_bgcolor:'transparent',plot_bgcolor:'transparent',font:{family:'Inter, system-ui',color:fg,size:11},xaxis:{...(latestArtifact.value.layout?.xaxis||{}),gridcolor:grid,zerolinecolor:grid},yaxis:{...(latestArtifact.value.layout?.yaxis||{}),gridcolor:grid,zerolinecolor:grid},legend:{orientation:'h',y:1.12}},{responsive:true,displaylogo:false,modeBarButtonsToRemove:['lasso2d','select2d']})
-}
-
-watch(latestArtifact, renderChart, {deep:true})
 watch(query, ()=>nextTick(resizeComposer))
 onMounted(async()=>{
   const results=await Promise.allSettled([api<Example[]>('/api/examples'),api<Dict>('/api/model/status')])
@@ -155,9 +146,9 @@ onMounted(async()=>{
   if(results[1].status==='fulfilled') modelStatus.value=results[1].value
   const id=localStorage.getItem('scidemo-task'); if(id) await restore(id)
   poller=window.setInterval(()=>task.value && !taskDone.value && refresh(task.value.task_id),2200)
-  resizeComposer(); renderChart()
+  resizeComposer()
 })
-onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller); if(chartEl.value && plotly)plotly.purge(chartEl.value) })
+onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
 </script>
 
 <template>
@@ -205,7 +196,7 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller); if(chart
           </div>
 
           <template v-else>
-            <div class="message user-message"><div class="avatar user-avatar">你</div><div><div class="message-meta"><b>你</b><span>刚刚</span></div><p>{{ task.user_query }}</p></div></div>
+            <div class="message user-message"><div class="avatar user-avatar">你</div><div><div class="message-meta"><b>你</b><span>刚刚</span></div><article class="user-bubble" v-html="renderMarkdown(task.user_query)"></article></div></div>
             <div class="message agent-message">
               <div class="avatar agent-avatar">∑</div>
               <div class="message-body">
@@ -220,6 +211,7 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller); if(chart
                         <div class="process-meta"><span>{{ processLabel(event) }}</span><time>{{ displayTime(event.timestamp) }}</time><em v-if="event.duration_ms">{{ event.duration_ms.toFixed(0) }} ms</em></div>
                         <h3>{{ event.title }}</h3>
                         <div class="process-markdown" v-html="renderMarkdown(event.summary)"></div>
+                        <PlotlyChart v-if="event.event_type==='artifact_created'" :artifact="event.payload" />
                         <details v-if="Object.keys(event.payload || {}).length">
                           <summary>{{ processKind(event)==='tool' || processKind(event)==='error' ? '查看输入 / 输出' : '查看结构化证据' }}</summary>
                           <pre>{{ processPayload(event) }}</pre>
@@ -235,16 +227,13 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller); if(chart
                   <div><button @click="review('reject')">终止</button><button @click="review('modify')">应用参数</button><button class="approve" @click="review('approve')">批准并继续</button></div>
                 </div>
 
-                <section v-if="task.final_answer" class="final-response"><div class="response-label"><span>✦</span><b>最终回答</b></div><article class="markdown-body" v-html="answerHtml"></article></section>
-
-                <section v-if="latestArtifact" class="result-chart">
-                  <div class="section-title"><div><span>VISUAL OUTPUT</span><h2>{{ latestArtifact.title }}</h2></div><span>Plotly · 交互图</span></div>
-                  <div ref="chartEl" class="plot"></div>
+                <section v-if="task.final_answer" class="final-response">
+                  <div class="response-label">
+                    <span>✦</span><b>最终回答</b>
+                    <em v-if="latestVerification" class="verification-badge" :class="{failed:!latestVerification.passed}" :title="`${latestVerification.name} · 误差 ${scientific(latestVerification.value)} · 容差 ${latestVerification.tolerance}`">{{ latestVerification.passed ? '✓ 已验证' : '! 验证未通过' }}</em>
+                  </div>
+                  <article class="markdown-body" v-html="answerHtml"></article>
                 </section>
-
-                <div v-if="task.verification_results?.length" class="verification-strip" :class="{failed:!task.verification_results.at(-1)?.passed}">
-                  <span>{{ task.verification_results.at(-1)?.passed ? '✓' : '!' }}</span><div><b>{{ task.verification_results.at(-1)?.passed ? '结果已通过独立验证' : '本轮验证未通过' }}</b><small>{{ task.verification_results.at(-1)?.name }} · 误差 {{ Number(task.verification_results.at(-1)?.value).toExponential(3) }} · 容差 {{ task.verification_results.at(-1)?.tolerance }}</small></div>
-                </div>
               </div>
             </div>
           </template>

@@ -1,5 +1,5 @@
 import pytest
-from app.science import TOOLS, safe_expression, find_root, differentiate_expression, interpolate_data, fit_curve, solve_symbolic_equation
+from app.science import TOOLS, safe_expression, find_root, differentiate_expression, interpolate_data, fit_curve, plot_artifact, solve_symbolic_equation
 
 def test_safe_expression_rejects_code():
     with pytest.raises(ValueError): safe_expression("__import__('os').system('id')")
@@ -7,6 +7,16 @@ def test_safe_expression_rejects_code():
 def test_newton_root_is_verified():
     result=find_root(expression="cos(x)-x",method="newton",initial=.5,tolerance=1e-10)
     assert result["converged"] and result["residual"]<1e-10
+
+def test_single_root_record_does_not_create_misleading_chart():
+    result={"method":"brentq","iterations":[{"iteration":9,"x":1.5,"residual":1e-12}]}
+    assert plot_artifact("root",result)=={}
+
+def test_multi_step_root_trace_has_method_aware_title():
+    result={"method":"newton","iterations":[{"iteration":0,"residual":1.0},{"iteration":1,"residual":1e-3}]}
+    artifact=plot_artifact("root",result)
+    assert artifact["title"]=="Newton 迭代收敛过程"
+    assert artifact["layout"]["xaxis"]["dtick"]==1
 
 def test_symbolic_derivative():
     assert differentiate_expression("x^2")["expression"]=="2*x"

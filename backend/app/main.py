@@ -1,9 +1,10 @@
 from __future__ import annotations
-import asyncio, json, uuid
+import asyncio, json, math, uuid
+from typing import Any
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from .examples import EXAMPLES
 from .models import HumanFeedback, ScientificAgentState, TaskCreate
 from .storage import store
@@ -11,11 +12,28 @@ from .workflow import run_task, resume_task
 from .config import settings
 import httpx
 
+def json_safe(value: Any) -> Any:
+    """Replace values forbidden by strict JSON before they reach Starlette."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+class SafeJSONResponse(JSONResponse):
+    def render(self, content: Any) -> bytes:
+        return super().render(json_safe(content))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
 
-app=FastAPI(title="SciDemo API",version="0.1.0",description="科学计算教学 Agent 工作流 API",lifespan=lifespan)
+app=FastAPI(title="SciDemo API",version="0.1.0",description="科学计算教学 Agent 工作流 API",lifespan=lifespan,
+            default_response_class=SafeJSONResponse)
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
 
 @app.get("/api/health")
@@ -71,14 +89,14 @@ async def task_events(task_id: str, after: int=Query(default=0,ge=0)):
         queue=store.subscribe(task_id)
         try:
             for item in store.events(task_id,last):
-                last=item['sequence']; yield f"id: {last}\ndata: {json.dumps(item,ensure_ascii=False)}\n\n"
+                last=item['sequence']; yield f"id: {last}\ndata: {json.dumps(json_safe(item),ensure_ascii=False,allow_nan=False)}\n\n"
             if (store.get(task_id) or {}).get('status') in ('completed','failed'): return
             while True:
                 try: item=await asyncio.wait_for(queue.get(),15)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"; continue
                 if item["sequence"]>last:
-                    last=item["sequence"]; yield f"id: {last}\ndata: {json.dumps(item,ensure_ascii=False)}\n\n"
+                    last=item["sequence"]; yield f"id: {last}\ndata: {json.dumps(json_safe(item),ensure_ascii=False,allow_nan=False)}\n\n"
                 if item["event_type"] in ("workflow_completed","workflow_failed"): break
         finally: store.unsubscribe(task_id,queue)
     return StreamingResponse(stream(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})

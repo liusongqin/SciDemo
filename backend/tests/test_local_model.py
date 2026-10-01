@@ -2,7 +2,7 @@ import json
 import httpx
 import pytest
 from langchain_openai import ChatOpenAI
-from app.llm import OpenAICompatibleModel
+from app.llm import OpenAICompatibleModel, first_tool_call
 from app.registry import validate_call
 from app import workflow
 from test_workflow import initial
@@ -42,6 +42,14 @@ def test_untrusted_tool_arguments():
 def test_model_function_definition_is_normalized():
     result=validate_call('solve_symbolic_equation',{'expression':'f(x) = x^3 - 3*x + 1','variable':'x'})
     assert result['expression']=='x^3 - 3*x + 1'
+
+def test_batched_model_tool_calls_are_executed_sequentially():
+    first,deferred=first_tool_call([
+        {'id':'one','name':'differentiate_expression','args':{}},
+        {'id':'two','name':'plot_function','args':{}},
+    ])
+    assert first['id']=='one'
+    assert deferred==1
 
 @pytest.mark.asyncio
 async def test_model_failure_is_not_success(monkeypatch):

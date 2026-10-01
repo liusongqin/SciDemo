@@ -1,4 +1,4 @@
-import uuid
+import math, uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 from langgraph.types import Command
@@ -14,10 +14,36 @@ def initial(query: str, review=False):
       "requires_human_review":review,"human_feedback":None,"retry_count":0,"max_retries":2,"tolerance":1e-9,
       "teaching_mode":False,"use_local_model":False,"final_answer":None,"error":None}
 
+def test_fallback_answer_includes_every_verified_result():
+    state=initial("多步计算")
+    state["tool_calls"]=[
+        {"id":"one","tool":"differentiate_expression","arguments":{"expression":"x^2"},"result":{"expression":"2*x"}},
+        {"id":"two","tool":"evaluate_expression","arguments":{"expression":"x^2","values":{"x":2}},"result":{"value":4}},
+    ]
+    state["verification_results"]=[
+        {"call_id":"one","passed":True,"name":"derivative","value":0.0},
+        {"call_id":"two","passed":True,"name":"evaluation","value":4.0},
+    ]
+    answer=workflow.fallback_answer(state)
+    assert "differentiate_expression" in answer and "evaluate_expression" in answer
+
 @pytest.mark.asyncio
 async def test_health_api():
     async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
         assert (await client.get("/api/health")).json()["status"]=="ok"
+
+@pytest.mark.asyncio
+async def test_task_api_serializes_non_finite_verification_values_as_null():
+    state=initial("工具执行失败")
+    state["verification_results"]=[{"passed":False,"value":math.inf}]
+    store.save(state["task_id"],state)
+    await store.emit(state["task_id"],"verification_completed","verify_result","验证失败","误差不可计算",{"value":math.nan})
+    async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+        response=await client.get(f"/api/tasks/{state['task_id']}")
+    assert response.status_code==200
+    data=response.json()
+    assert data["task"]["verification_results"][0]["value"] is None
+    assert data["events"][-1]["payload"]["value"] is None
 
 @pytest.mark.asyncio
 async def test_mock_end_to_end_and_event_history():

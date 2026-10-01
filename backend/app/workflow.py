@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from .config import settings
+from .goals import missing_tool_goals
 from .llm import MockModel, get_model
 from .models import ScientificAgentState
 from .registry import validate_call
@@ -94,13 +95,25 @@ def agent_history(state):
 def fallback_answer(state):
     passed=[x for x in agent_history(state) if x.get("verification",{}).get("passed")]
     if not passed: return "任务未能在允许的 Agent 步数内取得通过验证的结果。"
-    item=passed[-1]; check=item["verification"]
-    return f"已调用 `{item['tool']}` 完成计算。\n\n**程序验证的结论**：{check['name']} = {check['value']:.6g}，验证通过。\n\n**计算结果**：`{item['result']}`"
+    sections=[]
+    for index,item in enumerate(passed,1):
+        check=item["verification"]
+        sections.append(f"{index}. `{item['tool']}` — {check['name']} = {check['value']:.6g}\n   - 参数：`{item['arguments']}`\n   - 结果：`{item['result']}`")
+    return "**全部已验证计算记录**\n\n"+"\n".join(sections)
 
 async def agent_decide(state):
     current=int(state.get("current_step",0))
     if current>=settings.max_tool_steps:
-        answer=fallback_answer(state); ok=any(v.get("passed") for v in state.get("verification_results",[]))
+        missing=missing_tool_goals(state["user_query"],agent_history(state))
+        history=agent_history(state); answer=fallback_answer(state); ok=any(v.get("passed") for v in state.get("verification_results",[])) and not missing
+        if missing: answer=f"任务未完整完成：已达工具步数上限，仍缺少：{'；'.join(missing)}"
+        elif ok:
+            model=model_for(state)
+            try:
+                answer,record=await model.synthesize(state["user_query"],history,f"已完成显式目标，并达到 {settings.max_tool_steps} 次工具调用上限")
+                await event(state,"agent_decide","model_completed","综合回答已生成",record["response_summary"],record,record["duration_ms"])
+            except Exception as exc:
+                await event(state,"agent_decide","model_failed","综合回答生成失败",str(exc),{"stage":"synthesize"})
         await event(state,"agent_decide","agent_limit_reached","达到 Agent 步数上限",f"最多允许 {settings.max_tool_steps} 次工具决策")
         return {"pending_action":{"action":"finish"},"final_answer":answer,"status":"running" if ok else "failed","error":None if ok else answer}
     await event(state,"agent_decide","node_started","Agent 正在决定下一步","读取最近的工具观察和验证证据")
@@ -132,6 +145,8 @@ async def agent_decide(state):
         title=f"决定调用 {action['name']}"
     elif action.get("action")=="finish":
         if not any(v.get("passed") for v in state.get("verification_results",[])): raise ValueError("Agent 不能在没有通过程序验证的结果时结束")
+        missing=missing_tool_goals(state["user_query"],history)
+        if missing: raise ValueError(f"Agent 试图提前结束，仍缺少：{'；'.join(missing)}")
         title="决定结束任务"
     else: raise ValueError("模型返回了未知 Agent 动作")
     summary=action.get("decision_summary",title)
@@ -226,7 +241,8 @@ async def render_result(state):
         kind={"find_root":"root","interpolate_data":"interpolation","fit_curve":"fit","solve_ode":"ode"}.get(name)
         if kind: artifact=plot_artifact(kind,result)
     if not artifact: return {}
-    await event(state,"render_result","artifact_created","Agent 观察图表已生成",artifact["title"],{**artifact,"source_tool":name})
+    artifact={**artifact,"source_tool":name}
+    await event(state,"render_result","artifact_created","Agent 观察图表已生成",artifact["title"],artifact)
     step={"index":len(state.get("agent_steps",[])),"type":"visualization","title":artifact["title"],"summary":f"由 {name} 的结构化结果生成","status":"completed"}
     return {"artifacts":[*state.get("artifacts",[]),artifact],"agent_steps":[*state.get("agent_steps",[]),step]}
 

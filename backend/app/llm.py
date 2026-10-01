@@ -5,6 +5,7 @@ import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from .config import settings
+from .goals import missing_tool_goals
 
 TOOL_SPECS = [
  {"type":"function","function":{"name":"find_root","description":"求非线性标量方程 f(x)=0 的数值根；支持 Newton、二分和 Brent 方法。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x"]},"method":{"type":"string","enum":["newton","bisect","brentq"]},"initial":{"type":"number"},"bracket":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"tolerance":{"type":"number"},"max_iterations":{"type":"integer"}},"required":["expression","method","tolerance"],"additionalProperties":False}}},
@@ -28,6 +29,11 @@ for _spec in TOOL_SPECS:
     }
 TOOL_NAMES={item["function"]["name"] for item in TOOL_SPECS}
 
+def first_tool_call(tool_calls: list[dict[str,Any]]) -> tuple[dict[str,Any], int]:
+    """Keep execution sequential even when a model batches several calls."""
+    if not tool_calls: raise ValueError("模型没有生成工具调用")
+    return tool_calls[0],max(0,len(tool_calls)-1)
+
 class ModelAdapter(Protocol):
     provider: str
     model: str
@@ -35,6 +41,7 @@ class ModelAdapter(Protocol):
     async def select_tool(self, query: str, parsed: dict[str,Any], suggested: dict[str,Any]) -> tuple[dict[str,Any],dict[str,Any]]: ...
     async def explain(self, context: dict[str,Any], fallback: str) -> tuple[str,dict[str,Any]]: ...
     async def decide(self, query: str, parsed: dict[str,Any], history: list[dict[str,Any]], suggested: dict[str,Any]) -> tuple[dict[str,Any],dict[str,Any]]: ...
+    async def synthesize(self, query: str, history: list[dict[str,Any]], reason: str) -> tuple[str,dict[str,Any]]: ...
 
 def _record(stage: str, started: float, response: str, provider: str, model: str, fallback=False):
     return {"stage":stage,"provider":provider,"model":model,"duration_ms":(time.perf_counter()-started)*1000,
@@ -67,6 +74,11 @@ class MockModel:
             action={"action":"call_tool","id":f"mock_call_{len(history)+1}","name":parsed["tool"],"arguments":args,
                     "decision_summary":"根据当前观察选择受控科学工具继续计算"}
         return action,_record("agent_decision",started,action["decision_summary"],self.provider,self.model)
+    async def synthesize(self,query,history,reason):
+        started=time.perf_counter(); verified=[item for item in history if item.get("verification",{}).get("passed")]
+        lines=[f"- `{item['tool']}`：`{item.get('result',{})}`" for item in verified]
+        answer="**已验证的计算结果**\n\n"+"\n".join(lines)+f"\n\n**结束原因**：{reason}"
+        return answer,_record("synthesize",started,"汇总全部已验证工具结果",self.provider,self.model)
 
 def _json_object(text: str) -> dict[str,Any]:
     cleaned=re.sub(r"<think>[\s\S]*?</think>","",text).strip()
@@ -104,11 +116,11 @@ class OpenAICompatibleModel:
 精度参考: {suggested.get('tolerance',1e-8)}
 从用户问题中提取表达式和数据，不得替换为预置示例。缺少非必要参数时使用工具默认值。"""
         msg: AIMessage=await bound.ainvoke([SystemMessage(content="必须通过提供的科学工具计算。不要输出 Python 代码。"),HumanMessage(content=prompt)])
-        if len(msg.tool_calls)!=1: raise ValueError("模型必须生成且仅生成一个工具调用")
-        item=msg.tool_calls[0]
+        item,deferred=first_tool_call(msg.tool_calls)
         if item["name"] not in TOOL_NAMES: raise ValueError(f"模型选择了未注册工具: {item['name']}")
         args=item.get("args",{})
-        call={"id":item.get("id") or "science_call","name":item["name"],"arguments":args,"decision_summary":f"模型请求调用 {item['name']}"}
+        suffix=f"；其余 {deferred} 个建议将在后续轮次重新规划" if deferred else ""
+        call={"id":item.get("id") or "science_call","name":item["name"],"arguments":args,"decision_summary":f"模型请求调用 {item['name']}{suffix}"}
         return call,_record("tool_selection",started,call["decision_summary"],self.provider,self.model)
     async def explain(self,context,fallback):
         started=time.perf_counter(); prompt=f"""根据以下已验证的结构化记录写中文教学解释。必须清楚分成“程序验证的结论”“方法说明”“误差与限制”。不得改变数值，不得宣称未验证内容已通过。不要展示思维链。
@@ -126,17 +138,20 @@ class OpenAICompatibleModel:
         started=time.perf_counter(); first=not history
         bound=self.client.bind_tools(TOOL_SPECS,tool_choice="required" if first else "auto")
         compact=[]
-        for item in history[-3:]:
+        for item in history:
             result=json.dumps(item.get("result",{}),ensure_ascii=False,default=str)
             compact.append({"tool":item.get("tool"),"arguments":item.get("arguments",{}),
-                            "result_summary":result[:800],"verification":item.get("verification",{})})
+                            "result_summary":result[:500],"verification":item.get("verification",{})})
+        missing=missing_tool_goals(query,history)
         prompt=f"""你是一个能自主规划的科学计算 Agent。根据用户目标和工具观察，决定下一步。
 你可以连续调用多个工具；只有证据充分时才直接给出最终中文 Markdown 回答。
 不得编造工具结果，不得声称未通过的验证已经通过。不要展示隐藏思维链，只给简短公开决策摘要。
 用户问题: {query}
 初始任务理解: {json.dumps(parsed,ensure_ascii=False)}
-已有工具观察: {json.dumps(compact,ensure_ascii=False)}
+完整执行账本（不要重复已验证的调用）: {json.dumps(compact,ensure_ascii=False)}
+尚未完成的显式目标: {json.dumps(missing,ensure_ascii=False)}
 精度参考: {suggested.get('tolerance',1e-8)}
+必须逐项完成用户的编号要求；只有“尚未完成的显式目标”为空时才能结束。如果要求绘图，必须实际调用 plot_function，求根迭代残差图不能代替函数图像。
 若需要继续，请调用一个最合适的工具，并在 decision_summary 参数中写一句可公开展示的 Markdown 决策说明。若任务已完成，请直接输出最终答案，不要调用工具。"""
         messages=[SystemMessage(content="你控制科学计算工作流。工具白名单和程序验证是不可绕过的安全边界。"),HumanMessage(content=query)]
         for item in history[-2:]:
@@ -146,18 +161,53 @@ class OpenAICompatibleModel:
         messages.append(HumanMessage(content=prompt))
         msg: AIMessage=await bound.ainvoke(messages)
         if msg.tool_calls:
-            if len(msg.tool_calls)!=1: raise ValueError("每轮只允许模型调用一个工具")
-            item=msg.tool_calls[0]
+            item,deferred=first_tool_call(msg.tool_calls)
             if item["name"] not in TOOL_NAMES: raise ValueError(f"模型选择了未注册工具: {item['name']}")
             args=dict(item.get("args",{})); public_summary=str(args.pop("decision_summary","")).strip()
             visible_content=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content or "")).strip()
+            summary=public_summary or visible_content[:600] or f"模型决定调用 `{item['name']}` 继续求解。"
+            if deferred: summary+=f" 模型同时建议了另外 {deferred} 个调用；为了逐步验证，将在后续轮次重新规划。"
             action={"action":"call_tool","id":item.get("id") or f"science_call_{len(history)+1}","name":item["name"],
-                    "arguments":args,"decision_summary":public_summary or visible_content[:600] or f"模型决定调用 `{item['name']}` 继续求解。"}
+                    "arguments":args,"decision_summary":summary}
         else:
             answer=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip()
             if not answer: raise ValueError("模型既未调用工具，也未给出最终答案")
             action={"action":"finish","answer":answer,"decision_summary":"模型根据现有工具观察决定结束任务"}
         return action,_record("agent_decision",started,action["decision_summary"],self.provider,self.model)
+    async def synthesize(self,query,history,reason):
+        started=time.perf_counter(); records=[]
+        for index,item in enumerate(history,1):
+            if not item.get("verification",{}).get("passed"): continue
+            result=json.dumps(item.get("result",{}),ensure_ascii=False,default=str)
+            records.append({"step":index,"tool":item.get("tool"),"arguments":item.get("arguments",{}),
+                            "result":result[:1400],"verification":item.get("verification",{})})
+        prompt=f"""请根据全部已验证记录，回答用户的原始问题。
+用户问题: {query}
+已验证记录: {json.dumps(records,ensure_ascii=False)}
+工作流结束原因: {reason}
+
+要求：
+1. 逐项回答用户的编号要求，先给结论，再给必要证据。
+2. 对函数分析，必须明确写出根、导数、驻点及函数值、单调区间和局部极值。
+3. 只使用记录中的数值和程序验证结论；不得编造未执行的计算。
+4. 图表已在对话中单独展示，只需解释图表与结论的关系。
+5. 用简洁、结构清晰的中文 Markdown，不要输出思维链。"""
+        client=self.client.bind(max_tokens=max(settings.llm_max_tokens,2048))
+        system=SystemMessage(content="你是科学计算结果汇总器，必须完整回答用户的每项要求。")
+        msg=await client.ainvoke([system,HumanMessage(content=prompt)])
+        answer=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip()
+        continuations=0
+        while msg.response_metadata.get("finish_reason") in ("length","max_tokens") and continuations<2:
+            continuation_prompt=f"""上一段回答因长度限制被截断。请从断点处继续，不要重复已有内容，必须补齐尚未回答的编号要求并完整收尾。
+已有回答：
+{answer}"""
+            msg=await client.ainvoke([system,HumanMessage(content=continuation_prompt)])
+            continuation=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip()
+            if not continuation: break
+            answer+=f"\n\n{continuation}"; continuations+=1
+        if not answer: raise ValueError("模型未生成综合回答")
+        summary="基于全部已验证记录生成最终回答"+(f"，自动续写 {continuations} 次" if continuations else "")
+        return answer,_record("synthesize",started,summary,self.provider,self.model)
 
 def get_model(use_local_model: bool=True) -> ModelAdapter:
     if not use_local_model or settings.llm_provider.lower()=="mock": return MockModel()

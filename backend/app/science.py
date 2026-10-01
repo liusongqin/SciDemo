@@ -154,7 +154,10 @@ TOOLS={"simplify_expression":simplify_expression,"differentiate_expression":diff
 
 def plot_artifact(kind: str, result: dict[str,Any]):
     if kind=="root":
-        it=result["iterations"]; return {"kind":"plotly","title":"Newton 迭代与残差","data":[{"type":"scatter","mode":"lines+markers","name":"残差","x":[a["iteration"] for a in it],"y":[a["residual"] for a in it]}],"layout":{"yaxis":{"type":"log","title":"|f(x)|"},"xaxis":{"title":"迭代次数"}}}
+        it=result["iterations"]
+        if len(it)<2: return {}
+        method={"newton":"Newton","bisect":"二分法","brentq":"Brent"}.get(result.get("method"),"求根")
+        return {"kind":"plotly","title":f"{method} 迭代收敛过程","data":[{"type":"scatter","mode":"lines+markers","name":"|f(x)|","x":[a["iteration"] for a in it],"y":[a["residual"] for a in it]}],"layout":{"yaxis":{"type":"log","title":"残差 |f(x)|"},"xaxis":{"title":"迭代次数","dtick":1}}}
     if kind=="interpolation":
         return {"kind":"plotly","title":"插值曲线","data":[{"type":"scatter","mode":"lines","name":"插值","x":result["x"],"y":result["y"]},{"type":"scatter","mode":"markers","name":"节点","x":result["source_x"],"y":result["source_y"]}],"layout":{}}
     if kind=="fit":
