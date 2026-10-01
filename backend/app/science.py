@@ -65,6 +65,20 @@ def _json(value: Any):
 def simplify_expression(expression: str):
     value = sp.simplify(safe_expression(expression)); return {"expression": str(value), "latex": sp.latex(value)}
 
+def transform_expression(expression: str, operation="expand"):
+    source=safe_expression(expression)
+    operations={"expand":sp.expand,"factor":sp.factor,"cancel":sp.cancel,"trigsimp":sp.trigsimp}
+    if operation not in operations: raise ValueError("表达式变换仅支持 expand/factor/cancel/trigsimp")
+    value=operations[operation](source)
+    return {"source":str(source),"expression":str(value),"latex":sp.latex(value),"operation":operation}
+
+def calculate_limit(expression: str, variable="x", point=0.0, direction="both"):
+    source=safe_expression(expression); x=ALLOWED_NAMES[variable]
+    if direction not in ("both","left","right"): raise ValueError("极限方向仅支持 both/left/right")
+    direction_arg={"both":"+-","left":"-","right":"+"}[direction]
+    value=sp.limit(source,x,point,dir=direction_arg)
+    return {"expression":str(value),"latex":sp.latex(value),"source":str(source),"variable":variable,"point":point,"direction":direction}
+
 def differentiate_expression(expression: str, variable="x", order=1):
     if order not in range(1, 6): raise ValueError("求导阶数必须为 1 到 5")
     source=safe_expression(expression); result=sp.diff(source, ALLOWED_NAMES[variable], order)
@@ -74,6 +88,25 @@ def integrate_expression(expression: str, variable="x", lower=None, upper=None):
     source=safe_expression(expression); x=ALLOWED_NAMES[variable]
     result=sp.integrate(source, x) if lower is None or upper is None else sp.integrate(source,(x,lower,upper))
     return {"expression": str(result), "latex": sp.latex(result), "definite": lower is not None and upper is not None}
+
+def integrate_multiple(expression: str, variables: list[str], lower_bounds: list[float], upper_bounds: list[float]):
+    if not 2 <= len(variables) <= 3 or len(set(variables))!=len(variables): raise ValueError("多重积分支持 2 到 3 个不同变量")
+    if len(lower_bounds)!=len(variables) or len(upper_bounds)!=len(variables): raise ValueError("变量与积分上下限数量必须一致")
+    limits=[]
+    for name,lower,upper in zip(variables,lower_bounds,upper_bounds):
+        if name not in ALLOWED_NAMES or lower>=upper: raise ValueError("积分变量无效或上下限未递增")
+        limits.append((ALLOWED_NAMES[name],lower,upper))
+    result=sp.integrate(safe_expression(expression),*limits)
+    return {"expression":str(result),"latex":sp.latex(result),"variables":variables,"limits":[[a,b] for a,b in zip(lower_bounds,upper_bounds)]}
+
+def multivariate_derivative(expression: str, variables: list[str], operation="gradient"):
+    source=safe_expression(expression)
+    if not 1 <= len(variables) <= 4 or any(v not in ALLOWED_NAMES for v in variables): raise ValueError("微分变量必须是 x/y/z/t")
+    syms=[ALLOWED_NAMES[v] for v in variables]
+    if operation=="gradient": value=sp.Matrix([sp.diff(source,s) for s in syms])
+    elif operation=="hessian": value=sp.hessian(source,syms)
+    else: raise ValueError("多变量微分仅支持 gradient/hessian")
+    return {"operation":operation,"variables":variables,"expression":str(value),"latex":sp.latex(value),"shape":list(value.shape)}
 
 def solve_symbolic_equation(expression: str, variable="x"):
     expr=safe_expression(expression); sols=sp.solve(expr, ALLOWED_NAMES[variable])
@@ -88,6 +121,36 @@ def solve_symbolic_system(expressions: list[str], variables: list[str]):
     if not 1 <= len(expressions) <= 4 or len(variables)>4: raise ValueError("方程组限 1 到 4 个方程/变量")
     exprs=[safe_expression(e) for e in expressions]; syms=[ALLOWED_NAMES[v] for v in variables]
     return {"solutions": [{str(k):str(v) for k,v in s.items()} for s in sp.solve(exprs,syms,dict=True)]}
+
+def matrix_calculation(operation: str, matrix_a: list[list[float]], matrix_b: list[list[float]]|None=None, vector: list[float]|None=None):
+    a=sp.Matrix(matrix_a)
+    if not 1 <= a.rows <= 8 or not 1 <= a.cols <= 8: raise ValueError("矩阵维度限制为 1 到 8")
+    b=sp.Matrix(matrix_b) if matrix_b is not None else None
+    if operation=="transpose": value=a.T
+    elif operation=="determinant": value=a.det()
+    elif operation=="rank": value=a.rank()
+    elif operation=="inverse":
+        if a.rows!=a.cols or a.det()==0: raise ValueError("矩阵不可逆")
+        value=a.inv()
+    elif operation in ("add","subtract","multiply"):
+        if b is None: raise ValueError("该运算需要 matrix_b")
+        value={"add":lambda:a+b,"subtract":lambda:a-b,"multiply":lambda:a*b}[operation]()
+    elif operation=="eigenvalues": value={str(k):int(v) for k,v in a.eigenvals().items()}
+    elif operation=="eigenvectors": value=[{"value":str(item[0]),"multiplicity":item[1],"vectors":[[str(v) for v in vec] for vec in item[2]]} for item in a.eigenvects()]
+    elif operation=="solve_linear":
+        if vector is None or len(vector)!=a.rows: raise ValueError("线性方程组需要与矩阵行数一致的 vector")
+        value=a.solve_least_squares(sp.Matrix(vector)) if a.rows!=a.cols else a.inv()*sp.Matrix(vector)
+    else: raise ValueError("未知矩阵运算")
+    if isinstance(value,sp.MatrixBase): serialized=[[str(value[i,j]) for j in range(value.cols)] for i in range(value.rows)]
+    else: serialized=value if isinstance(value,(dict,list,int)) else str(value)
+    return {"operation":operation,"result":serialized,"shape":list(a.shape)}
+
+def solve_symbolic_ode(rhs: str, y0: float|None=None, t0: float=0.0):
+    t=ALLOWED_NAMES["t"]; y=sp.Function("y"); source=safe_expression(rhs).subs(ALLOWED_NAMES["y"],y(t))
+    equation=sp.Eq(sp.diff(y(t),t),source); ics={y(t0):y0} if y0 is not None else None
+    solution=sp.dsolve(equation,ics=ics)
+    return {"equation":str(equation),"solution":str(solution),"solution_expression":str(solution.rhs),"rhs":rhs,
+            "latex":sp.latex(solution),"initial_condition":None if y0 is None else {"t0":t0,"y0":y0}}
 
 def series_expansion(expression: str, variable="x", point=0.0, order=6):
     if not 1 <= order <= 12: raise ValueError("展开阶数限 1 到 12")
@@ -147,9 +210,11 @@ def solve_ode(rhs: str, y0: float, t_span: tuple[float,float], samples=200):
     slopes=np.gradient(sol.y[0],sol.t); residual=slopes-np.array([fn(t,y) for t,y in zip(sol.t,sol.y[0])])
     return {"t":sol.t.tolist(),"y":sol.y[0].tolist(),"success":True,"initial_error":abs(sol.y[0][0]-y0),"max_discrete_residual":float(np.max(np.abs(residual[1:-1])))}
 
-TOOLS={"simplify_expression":simplify_expression,"differentiate_expression":differentiate_expression,"integrate_expression":integrate_expression,
+TOOLS={"simplify_expression":simplify_expression,"transform_expression":transform_expression,"calculate_limit":calculate_limit,
+       "differentiate_expression":differentiate_expression,"multivariate_derivative":multivariate_derivative,
+       "integrate_expression":integrate_expression,"integrate_multiple":integrate_multiple,"matrix_calculation":matrix_calculation,
        "solve_symbolic_equation":solve_symbolic_equation,"solve_symbolic_system":solve_symbolic_system,"series_expansion":series_expansion,
-       "evaluate_expression":evaluate_expression,"find_root":find_root,"interpolate_data":interpolate_data,"fit_curve":fit_curve,
+       "solve_symbolic_ode":solve_symbolic_ode,"evaluate_expression":evaluate_expression,"find_root":find_root,"interpolate_data":interpolate_data,"fit_curve":fit_curve,
        "numerical_integral":numerical_integral,"solve_ode":solve_ode}
 
 def plot_artifact(kind: str, result: dict[str,Any]):
@@ -174,7 +239,25 @@ def plot_function(expression: str, start=-5.0, end=5.0, variable="x", samples=40
     finite=np.isfinite(ys)
     return {"kind":"plotly","title":"函数曲线","data":[{"type":"scatter","mode":"lines","x":xs[finite].tolist(),"y":ys[finite].tolist(),"name":expression}],"layout":{}}
 
+def plot_implicit(expression: str, x_range: list[float], y_range: list[float], samples=100):
+    if len(x_range)!=2 or len(y_range)!=2 or x_range[0]>=x_range[1] or y_range[0]>=y_range[1]: raise ValueError("绘图区间必须递增")
+    expr=safe_expression(expression); unexpected=expr.free_symbols-{ALLOWED_NAMES["x"],ALLOWED_NAMES["y"]}
+    if unexpected: raise ValueError("隐函数只能包含 x 和 y")
+    count=min(max(samples,20),200); xs=np.linspace(*x_range,count); ys=np.linspace(*y_range,count); xx,yy=np.meshgrid(xs,ys)
+    zz=np.asarray(sp.lambdify((ALLOWED_NAMES["x"],ALLOWED_NAMES["y"]),expr,"numpy")(xx,yy),dtype=float)
+    return {"kind":"plotly","title":"隐函数曲线","data":[{"type":"contour","x":xs.tolist(),"y":ys.tolist(),"z":zz.tolist(),"contours":{"start":0,"end":0,"size":1},"showscale":False}],"layout":{}}
+
+def plot_surface(expression: str, x_range: list[float], y_range: list[float], samples=60):
+    if len(x_range)!=2 or len(y_range)!=2 or x_range[0]>=x_range[1] or y_range[0]>=y_range[1]: raise ValueError("绘图区间必须递增")
+    expr=safe_expression(expression); unexpected=expr.free_symbols-{ALLOWED_NAMES["x"],ALLOWED_NAMES["y"]}
+    if unexpected: raise ValueError("三维曲面表达式只能包含 x 和 y")
+    count=min(max(samples,10),100); xs=np.linspace(*x_range,count); ys=np.linspace(*y_range,count); xx,yy=np.meshgrid(xs,ys)
+    zz=np.asarray(sp.lambdify((ALLOWED_NAMES["x"],ALLOWED_NAMES["y"]),expr,"numpy")(xx,yy),dtype=float); zz=np.broadcast_to(zz,xx.shape)
+    return {"kind":"plotly","title":"三维函数曲面","data":[{"type":"surface","x":xs.tolist(),"y":ys.tolist(),"z":zz.tolist()}],"layout":{}}
+
 TOOLS["plot_function"] = plot_function
+TOOLS["plot_implicit"] = plot_implicit
+TOOLS["plot_surface"] = plot_surface
 
 def plot_root_iterations(result: dict[str,Any]): return plot_artifact("root",result)
 def plot_interpolation(result: dict[str,Any]): return plot_artifact("interpolation",result)

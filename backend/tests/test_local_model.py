@@ -2,7 +2,7 @@ import json
 import httpx
 import pytest
 from langchain_openai import ChatOpenAI
-from app.llm import OpenAICompatibleModel, first_tool_call
+from app.llm import DECISION_MAX_TOKENS, OpenAICompatibleModel, first_tool_call
 from app.registry import validate_call
 from app import workflow
 from test_workflow import initial
@@ -38,6 +38,7 @@ async def test_local_protocol_tool_result_round_trip(monkeypatch):
 def test_untrusted_tool_arguments():
     with pytest.raises(ValueError): validate_call('find_root',{'expression':'x','method':'newton','tolerance':1e-8,'file':'/tmp/a'})
     with pytest.raises(ValueError): validate_call('solve_ode',{'rhs':'y','y0':0,'t_span':[2,1]})
+    with pytest.raises(ValueError): validate_call('matrix_calculation',{'operation':'inverse','matrix_a':[[1,2],[3]]})
 
 def test_model_function_definition_is_normalized():
     result=validate_call('solve_symbolic_equation',{'expression':'f(x) = x^3 - 3*x + 1','variable':'x'})
@@ -50,6 +51,11 @@ def test_batched_model_tool_calls_are_executed_sequentially():
     ])
     assert first['id']=='one'
     assert deferred==1
+
+def test_decision_output_budget_fits_local_context(monkeypatch):
+    monkeypatch.setattr(workflow.settings,'llm_max_tokens',8192)
+    adapter=OpenAICompatibleModel()
+    assert adapter.client.max_tokens==DECISION_MAX_TOKENS
 
 @pytest.mark.asyncio
 async def test_model_failure_is_not_success(monkeypatch):

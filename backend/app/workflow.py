@@ -5,6 +5,9 @@ import sympy as sp
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
+from .agents import (ANALYST, CRITIC, REPORTER, SOLVER, handoff_record,
+                     problem_analyst, report_writer, scientific_solver,
+                     verification_critic)
 from .config import settings
 from .goals import missing_tool_goals
 from .llm import MockModel, get_model
@@ -13,8 +16,10 @@ from .registry import validate_call
 from .science import ALLOWED_NAMES, TOOLS, plot_artifact, safe_expression
 from .storage import store
 
-KIND_TOOL={"root":"find_root","equation":"solve_symbolic_equation","derivative":"differentiate_expression",
- "integral":"integrate_expression","interpolation":"interpolate_data","fit":"fit_curve","ode":"solve_ode"}
+KIND_TOOL={"root":"find_root","equation":"solve_symbolic_equation","system":"solve_symbolic_system",
+ "derivative":"differentiate_expression","integral":"integrate_expression","limit":"calculate_limit",
+ "matrix":"matrix_calculation","transform":"transform_expression","symbolic_ode":"solve_symbolic_ode",
+ "interpolation":"interpolate_data","fit":"fit_curve","ode":"solve_ode"}
 
 def normalize_kind(kind:str,mode:str,fallback_kind:str)->str:
     if kind not in KIND_TOOL: kind=fallback_kind
@@ -28,7 +33,12 @@ def _numbers(text:str,key:str):
 
 def understand(query:str):
     q=query.lower().replace("＝","=")
-    if "插值" in q: kind,tool,mode="interpolation","interpolate_data","numeric"
+    if "矩阵" in q or "特征值" in q or "行列式" in q: kind,tool,mode="matrix","matrix_calculation","symbolic"
+    elif "极限" in q or "lim" in q: kind,tool,mode="limit","calculate_limit","symbolic"
+    elif "方程组" in q: kind,tool,mode="system","solve_symbolic_system","symbolic"
+    elif ("解析" in q or "符号" in q) and ("ode" in q or "微分方程" in q): kind,tool,mode="symbolic_ode","solve_symbolic_ode","symbolic"
+    elif "展开" in q or "因式分解" in q: kind,tool,mode="transform","transform_expression","symbolic"
+    elif "插值" in q: kind,tool,mode="interpolation","interpolate_data","numeric"
     elif "拟合" in q: kind,tool,mode="fit","fit_curve","numeric"
     elif "ode" in q or "初值" in q or "y'" in q: kind,tool,mode="ode","solve_ode","numeric"
     elif "求导" in q or "导数" in q: kind,tool,mode="derivative","differentiate_expression","symbolic"
@@ -50,6 +60,11 @@ def suggested_args(state:ScientificAgentState):
     if kind=="equation": return {"expression":expression_from(q),"variable":"x"}
     if kind=="derivative": return {"expression":expression_from(q),"variable":"x","order":1}
     if kind=="integral": return {"expression":expression_from(q),"variable":"x"}
+    if kind=="limit": return {"expression":expression_from(q),"variable":"x","point":0.,"direction":"both"}
+    if kind=="transform": return {"expression":expression_from(q),"operation":"expand" if "展开" in q else "factor"}
+    if kind=="symbolic_ode": return {"rhs":"y - t^2 + 1","y0":.5,"t0":0.}
+    if kind=="matrix": return {"operation":"determinant","matrix_a":[[1.,0.],[0.,1.]]}
+    if kind=="system": return {"expressions":["x+y-2","x-y"],"variables":["x","y"]}
     if kind in ("interpolation","fit"):
         x,y=_numbers(q,"x"),_numbers(q,"y")
         if not x: x=[0,1,2,3,4] if kind=="interpolation" else [0,1,2,3,4,5]
@@ -60,6 +75,11 @@ def suggested_args(state:ScientificAgentState):
 async def event(state,node,etype,title,summary,payload=None,duration=None):
     await store.emit(state["task_id"],etype,node,title,summary,payload,duration)
 
+async def handoff(state, source, target, reason):
+    record=handoff_record(source,target,reason)
+    await event(state,target.key,"agent_handoff",f"{source.name} → {target.name}",reason,record)
+    return [*state.get("agent_handoffs",[]),record]
+
 def model_for(state): return get_model(bool(state.get("use_local_model",True)))
 
 async def model_failure(state,node,stage,exc):
@@ -69,19 +89,21 @@ async def model_failure(state,node,stage,exc):
     return MockModel()
 
 async def understand_problem(state):
-    await event(state,"understand_problem","node_started","理解用户目标","提取计算对象、约束和预期输出")
+    await event(state,ANALYST.key,"node_started","Problem Analyst 理解用户目标","提取计算对象、约束和预期输出",{"agent":ANALYST.key})
     fallback=understand(state["user_query"]); model=model_for(state)
-    await event(state,"understand_problem","model_started","模型分析问题","建立首轮任务上下文",{"provider":model.provider,"model":model.model})
-    try: parsed,record=await model.analyze(state["user_query"],fallback)
+    await event(state,ANALYST.key,"model_started","模型分析问题","建立首轮任务上下文",{"provider":model.provider,"model":model.model,"stage":"understand"})
+    try: parsed,record=await problem_analyst.analyze(model,state["user_query"],fallback)
     except Exception as exc:
-        model=await model_failure(state,"understand_problem","understand",exc); parsed,record=await model.analyze(state["user_query"],fallback)
+        model=await model_failure(state,ANALYST.key,"understand",exc); parsed,record=await problem_analyst.analyze(model,state["user_query"],fallback)
     kind=normalize_kind(parsed.get("kind",fallback["kind"]),parsed.get("computation_mode",fallback["mode"]),fallback["kind"])
     parsed.update({"kind":kind,"tool":KIND_TOOL[kind],"mode":parsed.get("computation_mode",fallback["mode"]),"raw":state["user_query"]})
     summary=parsed.get("decision_summary",f"识别为 {kind} 任务")
     step={"index":0,"type":"analysis","title":"理解用户目标","summary":summary,"status":"completed"}
-    await event(state,"understand_problem","model_completed","问题理解完成",summary,parsed,record["duration_ms"])
-    await event(state,"understand_problem","node_completed","初始分析已建立","控制权移交给 Agent 决策器")
+    await event(state,ANALYST.key,"model_completed","问题理解完成",summary,{**parsed,"stage":"understand"},record["duration_ms"])
+    handoffs=await handoff(state,ANALYST,SOLVER,"结构化任务说明已建立，交由求解 Agent 规划工具动作")
+    await event(state,ANALYST.key,"node_completed","初始分析已建立","控制权已移交给 Scientific Solver")
     return {"parsed_problem":parsed,"computation_mode":parsed["mode"],"status":"running","model_provider":model.provider,
+      "active_agent":SOLVER.key,"agent_handoffs":handoffs,
       "agent_steps":[*state.get("agent_steps",[]),step],"model_calls":[*state.get("model_calls",[]),record]}
 
 def agent_history(state):
@@ -121,35 +143,43 @@ async def agent_decide(state):
     if current>=settings.max_tool_steps:
         missing=missing_tool_goals(state["user_query"],agent_history(state))
         history=agent_history(state); answer=fallback_answer(state); ok=any(v.get("passed") for v in state.get("verification_results",[])) and not missing
+        model_calls=state.get("model_calls",[]); handoffs=state.get("agent_handoffs",[]); active_agent=SOLVER.key
         if missing: answer=f"任务未完整完成：已达工具步数上限，仍缺少：{'；'.join(missing)}"
         elif ok:
+            handoffs=await handoff(state,SOLVER,REPORTER,"求解循环已完成目标，交由报告 Agent 汇总证据")
+            active_agent=REPORTER.key
             model=model_for(state)
             try:
-                answer,record=await model.synthesize(state["user_query"],history,f"已完成显式目标，并达到 {settings.max_tool_steps} 次工具调用上限")
-                await event(state,"agent_decide","model_completed","综合回答已生成",record["response_summary"],record,record["duration_ms"])
+                await event(state,REPORTER.key,"model_started","Report Writer 正在生成报告","正在读取全部已验证记录并组织最终回答",{"stage":"synthesize","agent":REPORTER.key})
+                answer,record=await report_writer.write(model,state["user_query"],history,f"已完成显式目标，并达到 {settings.max_tool_steps} 次工具调用上限")
+                model_calls=[*model_calls,record]
+                await event(state,REPORTER.key,"model_completed","Report Writer 已生成最终报告",record["response_summary"],record,record["duration_ms"])
             except Exception as exc:
-                await event(state,"agent_decide","model_failed","综合回答生成失败",str(exc),{"stage":"synthesize"})
+                await event(state,REPORTER.key,"model_failed","Report Writer 生成失败",str(exc),{"stage":"synthesize"})
         await event(state,"agent_decide","agent_limit_reached","达到 Agent 步数上限",f"最多允许 {settings.max_tool_steps} 次工具决策")
-        return {"pending_action":{"action":"finish"},"final_answer":answer,"status":"running" if ok else "failed","error":None if ok else answer}
+        return {"pending_action":{"action":"finish"},"final_answer":answer,"status":"running" if ok else "failed","error":None if ok else answer,
+                "model_calls":model_calls,"agent_handoffs":handoffs,"active_agent":active_agent}
     await event(state,"agent_decide","node_started","Agent 正在决定下一步","读取最近的工具观察和验证证据")
     model=model_for(state); history=agent_history(state)
-    try: action,record=await model.decide(state["user_query"],state["parsed_problem"],history,suggested_args(state))
+    try: action,record=await scientific_solver.decide(model,state["user_query"],state["parsed_problem"],history,suggested_args(state))
     except Exception as exc:
-        model=await model_failure(state,"agent_decide","agent_decision",exc); action,record=await model.decide(state["user_query"],state["parsed_problem"],history,suggested_args(state))
+        model=await model_failure(state,SOLVER.key,"agent_decision",exc); action,record=await scientific_solver.decide(model,state["user_query"],state["parsed_problem"],history,suggested_args(state))
     redundant=redundant_action_reason(state,action,history)
     if redundant:
         await event(state,"agent_decide","redundant_action_skipped","已跳过冗余动作",redundant,
                     {"tool":action.get("name"),"arguments":action.get("arguments",{})})
+        handoffs=await handoff(state,SOLVER,REPORTER,"已确认无需重复执行，交由报告 Agent 汇总现有证据")
         try:
-            answer,summary_record=await model.synthesize(state["user_query"],history,f"已完成目标；未执行冗余动作：{redundant}")
-            await event(state,"agent_decide","model_completed","综合回答已生成",summary_record["response_summary"],summary_record,summary_record["duration_ms"])
+            await event(state,REPORTER.key,"model_started","Report Writer 正在生成报告","正在读取全部已验证记录并组织最终回答",{"stage":"synthesize","agent":REPORTER.key})
+            answer,summary_record=await report_writer.write(model,state["user_query"],history,f"已完成目标；未执行冗余动作：{redundant}")
+            await event(state,REPORTER.key,"model_completed","Report Writer 已生成最终报告",summary_record["response_summary"],summary_record,summary_record["duration_ms"])
             model_calls=[*state.get("model_calls",[]),record,summary_record]
         except Exception as exc:
             answer=fallback_answer(state)
-            await event(state,"agent_decide","model_failed","综合回答生成失败",str(exc),{"stage":"synthesize"})
+            await event(state,REPORTER.key,"model_failed","Report Writer 生成失败",str(exc),{"stage":"synthesize"})
             model_calls=[*state.get("model_calls",[]),record]
         return {"pending_action":{"action":"finish"},"final_answer":answer,"status":"running",
-                "model_calls":model_calls}
+                "model_calls":model_calls,"agent_handoffs":handoffs,"active_agent":REPORTER.key}
     if action.get("action")=="call_tool":
         action.setdefault("id",f"science_call_{current+1}"); raw_arguments=action.get("arguments",{})
         try:
@@ -184,7 +214,18 @@ async def agent_decide(state):
     await event(state,"agent_decide","node_completed","Agent 决策完成",summary)
     updates={"pending_action":action,"current_step":current+(1 if action["action"]=="call_tool" else 0),
       "agent_steps":[*state.get("agent_steps",[]),step],"model_calls":[*state.get("model_calls",[]),record]}
-    if action["action"]=="finish": updates["final_answer"]=action["answer"]
+    if action["action"]=="finish":
+        handoffs=await handoff(state,SOLVER,REPORTER,"求解目标已完成，交由独立报告 Agent 汇总证据")
+        answer=action["answer"]
+        if hasattr(model,"synthesize"):
+            try:
+                await event(state,REPORTER.key,"model_started","Report Writer 正在生成报告","正在读取全部已验证记录并组织最终回答",{"stage":"synthesize","agent":REPORTER.key})
+                answer,report_record=await report_writer.write(model,state["user_query"],history,"求解 Agent 已完成全部显式目标")
+                updates["model_calls"]=[*updates["model_calls"],report_record]
+                await event(state,REPORTER.key,"model_completed","Report Writer 已生成最终报告",report_record["response_summary"],report_record,report_record["duration_ms"])
+            except Exception as exc:
+                await event(state,REPORTER.key,"model_failed","Report Writer 生成失败",str(exc),{"stage":"synthesize"})
+        updates.update({"final_answer":answer,"active_agent":REPORTER.key,"agent_handoffs":handoffs})
     else: updates["plan"]=[{"step":current+1,"action":"Agent 自主工具调用","tool":action["name"],"arguments":action["arguments"],"decision_summary":summary}]
     return updates
 
@@ -212,7 +253,8 @@ async def execute_tool(state):
         step={"index":len(state.get("agent_steps",[])),"type":"tool","title":action["name"],"summary":"工具返回结构化观察","status":"completed","tool":action["name"]}
         await event(state,"execute_tool","tool_completed",f"{action['name']} 执行完成","结果已返回 Agent 环境",record,duration)
         await event(state,"execute_tool","node_completed","工具观察已记录","进入独立验证")
-        return {"tool_calls":[*state.get("tool_calls",[]),record],"observations":[*state.get("observations",[]),result],"agent_steps":[*state.get("agent_steps",[]),step],"status":"running","error":None}
+        handoffs=await handoff(state,SOLVER,CRITIC,"工具已返回结构化观察，需要独立验证")
+        return {"tool_calls":[*state.get("tool_calls",[]),record],"observations":[*state.get("observations",[]),result],"agent_steps":[*state.get("agent_steps",[]),step],"agent_handoffs":handoffs,"active_agent":CRITIC.key,"status":"running","error":None}
     except Exception as exc:
         duration=(time.perf_counter()-started)*1000; result={"error":str(exc)}
         record={"id":action["id"],"tool":action["name"],"arguments":args,"result":result,"duration_ms":duration}
@@ -249,23 +291,50 @@ def verify_call(call,tolerance):
     elif name=="series_expansion": value,check_name,passed=0.,"symbolic_series_generated",bool(result.get("expression"))
     elif name=="plot_function":
         count=len(result.get("data",[{}])[0].get("x",[])); value,check_name,passed=float(count),"finite_plot_samples",count>=2
+    elif name=="transform_expression":
+        value=0. if sp.simplify(safe_expression(result["source"])-safe_expression(result["expression"]))==0 else 1.; check_name,passed="symbolic_equivalence",value==0
+    elif name=="calculate_limit": value,check_name,passed=0.,"symbolic_limit_generated",bool(result.get("expression"))
+    elif name=="integrate_multiple": value,check_name,passed=0.,"multiple_integral_generated",bool(result.get("expression"))
+    elif name=="multivariate_derivative": value,check_name,passed=0.,"derivative_matrix_generated",bool(result.get("expression"))
+    elif name=="solve_symbolic_system":
+        value,check_name,passed=float(len(result.get("solutions",[]))),"system_solutions_generated",bool(result.get("solutions"))
+    elif name=="matrix_calculation": value,check_name,passed=0.,"matrix_result_generated","result" in result
+    elif name=="solve_symbolic_ode": value,check_name,passed=0.,"symbolic_ode_generated",bool(result.get("solution_expression"))
+    elif name in ("plot_implicit","plot_surface"):
+        data=result.get("data",[{}])[0]; count=len(data.get("z",[])); value,check_name,passed=float(count),"finite_plot_grid",count>=2
     return {"call_id":call.get("id"),"name":check_name,"passed":bool(passed),"value":float(value),"tolerance":tolerance,"explanation":"由独立程序检查生成；Agent 不能修改该结论"}
 
 async def verify_result(state):
-    await event(state,"verify_result","node_started","独立验证工具观察","使用数值或符号程序检查")
-    check=verify_call(state["tool_calls"][-1],state["tolerance"])
-    if "验证失败重试" in state["user_query"] and state.get("retry_count",0)==0: check.update({"passed":False,"name":"intentional_demo_failure","value":max(check["value"],state["tolerance"]*100)})
-    retry_count=state.get("retry_count",0)+(0 if check["passed"] else 1); title="验证通过" if check["passed"] else "验证未通过，交回 Agent"
-    await event(state,"verify_result","verification_completed",title,f"{check['name']} = {check['value']:.3g}",check)
+    await event(state,CRITIC.key,"node_started","Verification Critic 审阅结果","调用程序验证工具并由模型审查证据")
+    model=model_for(state)
+    try:
+        if not hasattr(model,"review_verification"): raise AttributeError("adapter has no verification reviewer")
+        check,record=await verification_critic.verify(model,state["user_query"],state["tool_calls"][-1],state["tolerance"],verify_call)
+    except AttributeError:
+        check=verify_call(state["tool_calls"][-1],state["tolerance"])
+        check["program_passed"]=bool(check["passed"]); check["agent_approved"]=bool(check["passed"])
+        review={"approved":check["passed"],"summary":"兼容适配器沿用当前步骤的程序验证结论","recommendation":"accept_step" if check["passed"] else "retry_step"}
+        check["agent_review"]=review
+        record={"stage":"verification_review","provider":getattr(model,"provider","unknown"),"model":getattr(model,"model","unknown"),"duration_ms":0,"response_summary":review["summary"],"fallback":True}
+    except Exception as exc:
+        model=await model_failure(state,CRITIC.key,"verification_review",exc)
+        check,record=await verification_critic.verify(model,state["user_query"],state["tool_calls"][-1],state["tolerance"],verify_call)
+    if "验证失败重试" in state["user_query"] and state.get("retry_count",0)==0:
+        check.update({"passed":False,"program_passed":False,"agent_approved":False,"name":"intentional_demo_failure","value":max(check["value"],state["tolerance"]*100)})
+        check["agent_review"]={"approved":False,"summary":"教学演示注入了当前步骤验证失败，要求修正本次方案","recommendation":"retry_step"}
+    retry_count=state.get("retry_count",0)+(0 if check["passed"] else 1); title="当前步骤验证通过" if check["passed"] else "当前步骤验证未通过，退回修正"
+    await event(state,CRITIC.key,"verification_completed",title,check.get("agent_review",{}).get("summary",f"{check['name']} = {check['value']:.3g}"),check,record["duration_ms"])
     if not check["passed"]:
         await event(state,"agent_decide","retry_started","验证失败，Agent 重新决策",f"第 {retry_count} 次修正；模型可更换工具或参数",{"retry_count":retry_count,"previous_tool":state["tool_calls"][-1]["tool"]})
     await event(state,"verify_result","node_completed","验证证据已记录","Agent 将读取该证据并自主决定下一步")
     step={"index":len(state.get("agent_steps",[])),"type":"verification","title":title,"summary":f"{check['name']} = {check['value']:.3g}","status":"completed" if check["passed"] else "failed"}
-    return {"verification_results":[*state.get("verification_results",[]),check],"retry_count":retry_count,"agent_steps":[*state.get("agent_steps",[]),step],"status":"running"}
+    reason="当前结果已验收并写入账本，求解 Agent 继续检查剩余目标" if check["passed"] else "当前步骤证据未通过，退回求解 Agent 修正本次方案"
+    handoffs=await handoff(state,CRITIC,SOLVER,reason)
+    return {"verification_results":[*state.get("verification_results",[]),check],"retry_count":retry_count,"agent_steps":[*state.get("agent_steps",[]),step],"model_calls":[*state.get("model_calls",[]),record],"agent_handoffs":handoffs,"active_agent":SOLVER.key,"status":"running"}
 
 async def render_result(state):
     call=state["tool_calls"][-1]; result,name=call["result"],call["tool"]; artifact={}
-    if name=="plot_function": artifact=result
+    if name in {"plot_function","plot_implicit","plot_surface"}: artifact=result
     else:
         kind={"find_root":"root","interpolate_data":"interpolation","fit_curve":"fit","solve_ode":"ode"}.get(name)
         if kind: artifact=plot_artifact(kind,result)
@@ -277,10 +346,13 @@ async def render_result(state):
 
 async def finalize(state):
     failed=state.get("status") in ("failed","rejected") or not state.get("final_answer"); status="failed" if failed else "completed"
-    await event(state,"finalize","node_started","Agent 汇总任务","保存动态步骤、观察与验证证据")
+    handoffs=state.get("agent_handoffs",[])
+    if not failed and state.get("active_agent")!=REPORTER.key:
+        handoffs=await handoff(state,SOLVER,REPORTER,"求解循环已结束，交由报告 Agent 汇总已验证证据")
+    await event(state,REPORTER.key if not failed else "finalize","node_started","Report Writer 汇总任务" if not failed else "工作流整理失败状态","保存动态步骤、观察与验证证据")
     await event(state,"finalize","workflow_failed" if failed else "workflow_completed","Agent 任务停止" if failed else "Agent 自主任务完成",state.get("error") or "模型已根据通过验证的观察决定结束")
     step={"index":len(state.get("agent_steps",[])),"type":"finish","title":"任务完成" if not failed else "任务停止","summary":state.get("error") or "Agent 已结束循环","status":"failed" if failed else "completed"}
-    return {"status":status,"agent_steps":[*state.get("agent_steps",[]),step],"final_answer":state.get("final_answer") or f"任务未完成：{state.get('error') or '没有可验证结果'}"}
+    return {"status":status,"active_agent":REPORTER.key if not failed else state.get("active_agent",SOLVER.key),"agent_handoffs":handoffs,"agent_steps":[*state.get("agent_steps",[]),step],"final_answer":state.get("final_answer") or f"任务未完成：{state.get('error') or '没有可验证结果'}"}
 
 async def route_decision(state):
     if state.get("status")=="failed" or (state.get("pending_action") or {}).get("action")=="finish": return "finalize"

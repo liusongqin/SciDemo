@@ -29,7 +29,8 @@ def validate_call(name: str, arguments: dict) -> dict:
             if isinstance(value,bool) or not isinstance(value,(int,float)) or not math.isfinite(value): raise ValueError('数值必须有限')
             if t=='integer' and not isinstance(value,int): raise ValueError('参数必须为整数')
         if t=='array':
-            if not isinstance(value,list) or not 2<=len(value)<=500: raise ValueError('数组长度须为 2–500')
+            minimum,maximum=spec.get('minItems',2),spec.get('maxItems',500)
+            if not isinstance(value,list) or not minimum<=len(value)<=maximum: raise ValueError(f'数组长度须为 {minimum}–{maximum}')
             for item in value: check(item,spec['items'])
         if t=='object':
             if not isinstance(value,dict): raise ValueError('参数必须为对象')
@@ -40,7 +41,15 @@ def validate_call(name: str, arguments: dict) -> dict:
     for key,value in arguments.items():
         check(value,schema['properties'][key])
         if key in ('expression','rhs'): safe_expression(value)
+    for expression in arguments.get('expressions',[]): safe_expression(expression)
+    if ('lower' in arguments) != ('upper' in arguments): raise ValueError('定积分必须同时提供上下限')
+    if 'lower' in arguments and arguments['lower']>=arguments['upper']: raise ValueError('积分上下限必须递增')
+    for key in ('matrix_a','matrix_b'):
+        matrix=arguments.get(key)
+        if matrix and len({len(row) for row in matrix})!=1: raise ValueError('矩阵每行长度必须一致')
     if 'samples' in arguments and not 3<=arguments['samples']<=2000: raise ValueError('采样点数须为 3–2000')
     if name=='find_root': return RootInput(**arguments).model_dump()
     if 't_span' in arguments and (len(arguments['t_span'])!=2 or arguments['t_span'][0]>=arguments['t_span'][1]): raise ValueError('时间区间须递增')
+    for key in ('x_range','y_range'):
+        if key in arguments and arguments[key][0]>=arguments[key][1]: raise ValueError('绘图区间须递增')
     return arguments

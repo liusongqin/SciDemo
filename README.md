@@ -1,6 +1,6 @@
 # SciDemo：科学计算 Agent 教学工作流
 
-SciDemo 是一个本地模型驱动的科学计算教学系统。默认连接本机 vLLM：模型在循环中自主决定调用哪些工具、是否根据观察继续计算以及何时结束，SymPy/SciPy/NumPy 执行计算，独立验证器检查每次结果。网页可关闭“调用本地 Qwen 模型”使用离线 Mock。
+SciDemo 是一个本地模型驱动的多 Agent 科学计算教学系统。默认连接本机 vLLM：多个职责隔离的 Agent 在共享任务账本上协作，SymPy/SciPy/NumPy 执行计算，独立验证 Agent 检查每次结果。网页可关闭“调用本地 Qwen 模型”使用离线 Mock。
 
 ## 架构
 
@@ -8,6 +8,7 @@ SciDemo 是一个本地模型驱动的科学计算教学系统。默认连接本
 backend/app/
   main.py       FastAPI、SSE、任务与人工审核 API
   workflow.py   模型驱动的 decide → tool → verify → observe 循环、interrupt/resume
+  agents.py     Problem Analyst、Scientific Solver、Verification Critic、Report Writer
   science.py    AST 白名单解析、符号/数值工具、Plotly artifacts
   storage.py    SQLite 任务快照与有序事件历史
   llm.py        Mock 与 OpenAI-compatible/vLLM 模型适配器
@@ -16,6 +17,10 @@ backend/tests/  工具、安全、闭环、重试、人工恢复测试
 ```
 
 每个任务拥有 UUID `thread_id`。LangGraph 使用 checkpointer 支持运行时中断；SQLite 保存可序列化任务快照和稳定递增的事件序号，浏览器刷新后通过 `GET /api/tasks/{id}` 恢复。页面展示决策摘要和结构化输入输出，不展示隐藏推理。
+
+四个大模型 Agent 按 `分析 → 求解 → 独立审查 → 汇总` 协作。求解与审查之间可以循环多次；每次角色切换都会产生 `agent_handoff` 事件，并写入任务的 `active_agent` 与 `agent_handoffs` 字段。它们可以共用同一个本地模型服务，但使用独立角色提示和职责边界。Verification Critic 调用确定性验证工具取得残差或符号证据，再由模型审阅并决定接受或退回；模型不能推翻程序验证失败的硬性结论。
+
+科学工具覆盖表达式化简/展开/因式分解、极限、导数/梯度/Hessian、不定积分/定积分/多重积分、单方程与方程组、矩阵和线性代数、解析与数值 ODE、数值求根、插值、拟合，以及二维函数、隐函数和三维曲面可视化。所有工具均经过服务器端 schema 和安全表达式校验，不执行模型生成的任意 Python。
 
 ## 安装与运行
 

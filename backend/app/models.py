@@ -17,6 +17,8 @@ class ScientificAgentState(TypedDict, total=False):
     model_calls: list[dict[str, Any]]
     model_provider: str
     agent_steps: list[dict[str, Any]]
+    active_agent: str
+    agent_handoffs: list[dict[str, Any]]
     pending_action: dict[str, Any] | None
     review_completed: bool
     use_local_model: bool

@@ -11,15 +11,24 @@ TOOL_SPECS = [
  {"type":"function","function":{"name":"find_root","description":"求非线性标量方程 f(x)=0 的数值根；支持 Newton、二分和 Brent 方法。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x"]},"method":{"type":"string","enum":["newton","bisect","brentq"]},"initial":{"type":"number"},"bracket":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"tolerance":{"type":"number"},"max_iterations":{"type":"integer"}},"required":["expression","method","tolerance"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"solve_symbolic_equation","description":"使用 SymPy 求单变量方程 expression=0 的解析解。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x","y","z","t"]}},"required":["expression","variable"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"differentiate_expression","description":"对安全数学表达式进行符号求导。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x","y","z","t"]},"order":{"type":"integer","minimum":1,"maximum":5}},"required":["expression","variable","order"],"additionalProperties":False}}},
- {"type":"function","function":{"name":"integrate_expression","description":"计算安全数学表达式的不定积分。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x","y","z","t"]}},"required":["expression","variable"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"integrate_expression","description":"计算安全数学表达式的不定积分或一维定积分。指定上下限时计算定积分。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x","y","z","t"]},"lower":{"type":"number"},"upper":{"type":"number"}},"required":["expression","variable"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"interpolate_data","description":"对数据做线性插值或三次样条插值。","strict":True,"parameters":{"type":"object","properties":{"x":{"type":"array","items":{"type":"number"}},"y":{"type":"array","items":{"type":"number"}},"method":{"type":"string","enum":["linear","cubic"]},"samples":{"type":"integer"}},"required":["x","y","method"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"fit_curve","description":"用最小二乘多项式拟合数据。","strict":True,"parameters":{"type":"object","properties":{"x":{"type":"array","items":{"type":"number"}},"y":{"type":"array","items":{"type":"number"}},"degree":{"type":"integer","minimum":1,"maximum":5}},"required":["x","y","degree"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"solve_ode","description":"使用 SciPy 求一阶初值常微分方程 y'=f(t,y)。","strict":True,"parameters":{"type":"object","properties":{"rhs":{"type":"string"},"y0":{"type":"number"},"t_span":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"samples":{"type":"integer"}},"required":["rhs","y0","t_span"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"simplify_expression","description":"化简安全数学表达式。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"transform_expression","description":"对表达式执行展开、因式分解、有理式约分或三角化简。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"operation":{"type":"string","enum":["expand","factor","cancel","trigsimp"]}},"required":["expression","operation"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"calculate_limit","description":"计算单变量函数在有限点处的双侧或单侧极限。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x","y","z","t"]},"point":{"type":"number"},"direction":{"type":"string","enum":["both","left","right"]}},"required":["expression","variable","point","direction"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"integrate_multiple","description":"计算二重或三重定积分，各变量使用常数上下限。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variables":{"type":"array","items":{"type":"string","enum":["x","y","z","t"]},"minItems":2,"maxItems":3},"lower_bounds":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3},"upper_bounds":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":3}},"required":["expression","variables","lower_bounds","upper_bounds"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"multivariate_derivative","description":"计算多变量标量函数的梯度或 Hessian 矩阵。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variables":{"type":"array","items":{"type":"string","enum":["x","y","z","t"]},"minItems":1,"maxItems":4},"operation":{"type":"string","enum":["gradient","hessian"]}},"required":["expression","variables","operation"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"solve_symbolic_system","description":"解析求解最多四元的线性或非线性方程组，每个表达式等于零。","strict":True,"parameters":{"type":"object","properties":{"expressions":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":4},"variables":{"type":"array","items":{"type":"string","enum":["x","y","z","t"]},"minItems":1,"maxItems":4}},"required":["expressions","variables"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"matrix_calculation","description":"执行矩阵运算：转置、行列式、秩、求逆、加减乘、特征值/向量或求解 Ax=b。","strict":True,"parameters":{"type":"object","properties":{"operation":{"type":"string","enum":["transpose","determinant","rank","inverse","add","subtract","multiply","eigenvalues","eigenvectors","solve_linear"]},"matrix_a":{"type":"array","items":{"type":"array","items":{"type":"number"},"minItems":1,"maxItems":8},"minItems":1,"maxItems":8},"matrix_b":{"type":"array","items":{"type":"array","items":{"type":"number"},"minItems":1,"maxItems":8},"minItems":1,"maxItems":8},"vector":{"type":"array","items":{"type":"number"},"minItems":1,"maxItems":8}},"required":["operation","matrix_a"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"solve_symbolic_ode","description":"解析求解形如 y'(t)=f(t,y) 的一阶常微分方程，可带初值。","strict":True,"parameters":{"type":"object","properties":{"rhs":{"type":"string"},"y0":{"type":"number"},"t0":{"type":"number"}},"required":["rhs"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"series_expansion","description":"计算表达式在指定点的级数展开。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"variable":{"type":"string","enum":["x","y","z","t"]},"point":{"type":"number"},"order":{"type":"integer","minimum":1,"maximum":12}},"required":["expression","variable","point","order"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"evaluate_expression","description":"在给定变量值处计算表达式。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"values":{"type":"object","additionalProperties":{"type":"number"}}},"required":["expression","values"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"numerical_integral","description":"在有限区间上计算定积分并做独立梯形交叉检查。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"lower":{"type":"number"},"upper":{"type":"number"},"variable":{"type":"string","enum":["x","y","z","t"]}},"required":["expression","lower","upper","variable"],"additionalProperties":False}}},
  {"type":"function","function":{"name":"plot_function","description":"绘制只含一个自变量的解析函数。expression 只能包含 variable 指定的变量；求根、插值、拟合和 ODE 工具会自动生成结果图，不要再用本工具绘制它们的结果。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},"variable":{"type":"string","enum":["x","y","z","t"]},"samples":{"type":"integer"}},"required":["expression","start","end","variable"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"plot_implicit","description":"绘制 expression=0 的二维隐函数曲线。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"x_range":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"y_range":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"samples":{"type":"integer"}},"required":["expression","x_range","y_range"],"additionalProperties":False}}},
+ {"type":"function","function":{"name":"plot_surface","description":"绘制 z=expression(x,y) 的三维曲面。","strict":True,"parameters":{"type":"object","properties":{"expression":{"type":"string"},"x_range":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"y_range":{"type":"array","items":{"type":"number"},"minItems":2,"maxItems":2},"samples":{"type":"integer"}},"required":["expression","x_range","y_range"],"additionalProperties":False}}},
 ]
 # Every tool call may carry a short public rationale for the trace UI. It is
 # removed before server-side validation/execution and is not hidden chain of thought.
@@ -28,6 +37,9 @@ for _spec in TOOL_SPECS:
         "type":"string","description":"用 Markdown 写一句可公开展示的选择理由，不含隐藏思维链"
     }
 TOOL_NAMES={item["function"]["name"] for item in TOOL_SPECS}
+DECISION_MAX_TOKENS=2048
+ANALYSIS_MAX_TOKENS=1024
+REPORT_MAX_TOKENS=3072
 
 def public_text(value: Any) -> str:
     """Turn model prose into UI copy rather than exposing controller wording."""
@@ -48,6 +60,7 @@ class ModelAdapter(Protocol):
     async def select_tool(self, query: str, parsed: dict[str,Any], suggested: dict[str,Any]) -> tuple[dict[str,Any],dict[str,Any]]: ...
     async def explain(self, context: dict[str,Any], fallback: str) -> tuple[str,dict[str,Any]]: ...
     async def decide(self, query: str, parsed: dict[str,Any], history: list[dict[str,Any]], suggested: dict[str,Any]) -> tuple[dict[str,Any],dict[str,Any]]: ...
+    async def review_verification(self, query: str, call: dict[str,Any], evidence: dict[str,Any]) -> tuple[dict[str,Any],dict[str,Any]]: ...
     async def synthesize(self, query: str, history: list[dict[str,Any]], reason: str) -> tuple[str,dict[str,Any]]: ...
 
 def _record(stage: str, started: float, response: str, provider: str, model: str, fallback=False):
@@ -86,6 +99,11 @@ class MockModel:
         lines=[f"- `{item['tool']}`：`{item.get('result',{})}`" for item in verified]
         answer="**已验证的计算结果**\n\n"+"\n".join(lines)+f"\n\n**结束原因**：{reason}"
         return answer,_record("synthesize",started,"汇总全部已验证工具结果",self.provider,self.model)
+    async def review_verification(self,query,call,evidence):
+        started=time.perf_counter(); approved=bool(evidence.get("passed"))
+        review={"approved":approved,"summary":"程序证据满足验收条件" if approved else "程序证据未满足条件，要求重新求解",
+                "recommendation":"accept_step" if approved else "retry_step"}
+        return review,_record("verification_review",started,review["summary"],self.provider,self.model)
 
 def _json_object(text: str) -> dict[str,Any]:
     cleaned=re.sub(r"<think>[\s\S]*?</think>","",text).strip()
@@ -102,17 +120,17 @@ class OpenAICompatibleModel:
         async_http=httpx.AsyncClient(trust_env=False)
         self.model=settings.llm_model
         self.client=ChatOpenAI(model=settings.llm_model,api_key=settings.llm_api_key or "local",base_url=settings.llm_base_url,
-          temperature=0,max_tokens=settings.llm_max_tokens,timeout=settings.llm_timeout_seconds,max_retries=1,
+          temperature=0,max_tokens=min(settings.llm_max_tokens,DECISION_MAX_TOKENS),timeout=settings.llm_timeout_seconds,max_retries=1,
           http_client=sync_http,http_async_client=async_http,
           extra_body={"chat_template_kwargs":{"enable_thinking":False}})
     async def analyze(self,query,fallback):
         started=time.perf_counter()
         prompt=f"""分析下面的科学计算题，只输出一个 JSON 对象，不要输出推理过程。
-允许的任务类型: root,equation,derivative,integral,interpolation,fit,ode。
+允许的任务类型: root,equation,system,derivative,integral,limit,matrix,transform,symbolic_ode,interpolation,fit,ode。
 字段: kind, computation_mode(symbolic或numeric), variables(字符串数组), constraints(字符串数组), expected_output, decision_summary(一句公开摘要), needs_clarification(布尔值)。
 用户问题: {query}
 规则路由给出的可靠候选: {json.dumps(fallback,ensure_ascii=False)}"""
-        msg=await self.client.ainvoke([SystemMessage(content="你是科学计算 Agent 的任务分析器。不要泄露思维链，只给结构化结论。"),HumanMessage(content=prompt)])
+        msg=await self.client.bind(max_tokens=min(settings.llm_max_tokens,ANALYSIS_MAX_TOKENS)).ainvoke([SystemMessage(content="你是科学计算 Agent 的任务分析器。不要泄露思维链，只给结构化结论。"),HumanMessage(content=prompt)])
         data=_json_object(str(msg.content)); data["tool"]=fallback["tool"]; data["raw"]=query
         return data,_record("understand",started,data.get("decision_summary","完成任务分类"),self.provider,self.model)
     async def select_tool(self,query,parsed,suggested):
@@ -183,6 +201,23 @@ class OpenAICompatibleModel:
             if not answer: raise ValueError("模型既未调用工具，也未给出最终答案")
             action={"action":"finish","answer":answer,"decision_summary":"模型根据现有工具观察决定结束任务"}
         return action,_record("agent_decision",started,action["decision_summary"],self.provider,self.model)
+    async def review_verification(self,query,call,evidence):
+        started=time.perf_counter()
+        prompt=f"""你是独立的科学验证 Agent。你只验收“当前这一次工具调用”，不要判断整个用户任务是否已经完成，只输出 JSON 对象。
+字段: approved(布尔值), summary(一句公开说明), recommendation(accept_step 或 retry_step)。
+规则：
+1. approved 只表示当前工具结果及其程序证据是否可信。
+2. 其他根、驻点、极值、单调性、绘图等后续目标尚未完成，不是拒绝当前步骤的理由；当前步骤正确时应 approved=true，让求解 Agent 保留结果并继续。
+3. 只有当前调用本身错误、与当前调用意图不符、证据不支持当前结果，或程序证据 passed=false 时才拒绝。
+4. 不要重新计算或编造数值，也不要评价完整任务是否完成。
+用户目标: {query}
+工具记录: {json.dumps(call,ensure_ascii=False,default=str)[:3000]}
+程序证据: {json.dumps(evidence,ensure_ascii=False,default=str)}"""
+        msg=await self.client.bind(max_tokens=min(settings.llm_max_tokens,ANALYSIS_MAX_TOKENS)).ainvoke([SystemMessage(content="你是与求解 Agent 相互独立的验证审查 Agent。"),HumanMessage(content=prompt)])
+        review=_json_object(str(msg.content)); review["approved"]=bool(review.get("approved") and evidence.get("passed"))
+        review["summary"]=public_text(review.get("summary")) or "验证 Agent 已完成证据审查"
+        review["recommendation"]="accept_step" if review["approved"] else "retry_step"
+        return review,_record("verification_review",started,review["summary"],self.provider,self.model)
     async def synthesize(self,query,history,reason):
         started=time.perf_counter(); records=[]
         for index,item in enumerate(history,1):
@@ -201,7 +236,7 @@ class OpenAICompatibleModel:
 3. 只使用记录中的数值和程序验证结论；不得编造未执行的计算。
 4. 图表已在对话中单独展示，只需解释图表与结论的关系。
 5. 用简洁、结构清晰的中文 Markdown，不要输出思维链。"""
-        client=self.client.bind(max_tokens=max(settings.llm_max_tokens,2048))
+        client=self.client.bind(max_tokens=min(max(settings.llm_max_tokens,2048),REPORT_MAX_TOKENS))
         system=SystemMessage(content="你是科学计算结果汇总器，必须完整回答用户的每项要求。")
         msg=await client.ainvoke([system,HumanMessage(content=prompt)])
         answer=public_text(msg.content)

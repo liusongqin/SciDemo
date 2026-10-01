@@ -6,5 +6,14 @@ EXAMPLES = [
  {"id":"derivative","title":"导数交叉验证","query":"对 sin(x)*exp(x) 符号求导，并与有限差分比较","expected_tool":"differentiate_expression","method":"符号求导","verification":"多点有限差分交叉检查","discussion":"步长太大或太小会发生什么？"},
  {"id":"ode","title":"初值 ODE","query":"求解初值问题 y' = y - t^2 + 1, y(0)=0.5, t 从 0 到 2，并检查残差","expected_tool":"solve_ode","method":"RK45","verification":"初值及离散方程残差","discussion":"容差如何影响步数和误差？"},
  {"id":"retry","title":"验证失败与修正","query":"演示验证失败重试：用很低精度求 cos(x)-x=0，再自动提高精度","expected_tool":"find_root","method":"Newton 法逐步提高精度","verification":"第一次强制失败，修正后检查残差","discussion":"验证为何应独立于计算过程？"},
+ {"id":"transform","title":"展开与因式分解","query":"将 (x+2*y)^3 完全展开，再对 x^4-5*x^2+4 因式分解，并分别验证等价性","expected_tool":"transform_expression","method":"符号表达式变换","verification":"符号等价检查","discussion":"展开形式和因式形式分别适合什么任务？"},
+ {"id":"limit","title":"极限计算","query":"计算 sin(x)/x 在 x 趋近于 0 时的双侧极限","expected_tool":"calculate_limit","method":"符号极限","verification":"极限结果检查","discussion":"为什么直接代入会得到未定式？"},
+ {"id":"multicalculus","title":"梯度与 Hessian","query":"计算 f(x,y)=x^3+x^2*y+2*x*y^2+y^3 的梯度和 Hessian 矩阵","expected_tool":"multivariate_derivative","method":"多变量微分","verification":"导数矩阵检查","discussion":"Hessian 如何描述局部曲率？"},
+ {"id":"double-integral","title":"二重积分","query":"计算函数 x+y 在区域 0<=x<=1、0<=y<=2 上的二重积分","expected_tool":"integrate_multiple","method":"符号多重积分","verification":"积分结果检查","discussion":"积分次序是否影响结果？"},
+ {"id":"matrix","title":"矩阵综合计算","query":"对矩阵 [[2,1],[1,2]] 计算行列式、逆矩阵、特征值和特征向量","expected_tool":"matrix_calculation","method":"符号线性代数","verification":"矩阵结果检查","discussion":"特征值与可逆性有什么联系？"},
+ {"id":"system","title":"非线性方程组","query":"符号求解方程组 x^2+y^2=5、x-y=1，列出所有实数解并代回验证","expected_tool":"solve_symbolic_system","method":"非线性方程组","verification":"逐解代回","discussion":"解析解和数值解有何差异？"},
+ {"id":"symbolic-ode","title":"解析 ODE","query":"解析求解微分方程 y'=y，初值 y(0)=2，并验证解析解满足方程和初值","expected_tool":"solve_symbolic_ode","method":"SymPy dsolve","verification":"方程与初值检查","discussion":"解析解比数值解多提供了什么信息？"},
+ {"id":"implicit","title":"隐函数图","query":"绘制隐函数 x^2+y^2-4=0，x 和 y 的范围均为 [-3,3]","expected_tool":"plot_implicit","method":"二维等高线","verification":"绘图网格检查","discussion":"隐函数为什么不能总写成 y=f(x)？"},
+ {"id":"surface","title":"三维曲面","query":"绘制 z=sin(x)*cos(y) 的三维曲面，x 和 y 的范围均为 [-3.14159,3.14159]","expected_tool":"plot_surface","method":"Plotly 三维曲面","verification":"绘图网格检查","discussion":"曲面的周期性如何体现？"},
+ {"id":"multi-visual","title":"三种图形综合","query":"必须依次完成三个任务：用 plot_function 绘制 sin(x)*exp(-0.1*x) 在 [-10,10] 的二维图；用 plot_implicit 绘制 x^2+y^2-4=0 在 [-3,3]×[-3,3] 的隐函数图；用 plot_surface 绘制 sin(x)*cos(y) 在 [-3.14159,3.14159]×[-3.14159,3.14159] 的三维曲面。三个工具必须各调用一次。","expected_tool":"plot_function,plot_implicit,plot_surface","method":"多图协同生成","verification":"三类图表分别验证","discussion":"显函数、隐函数和曲面的数据结构有何不同？"},
 ]
-

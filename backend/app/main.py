@@ -35,6 +35,11 @@ async def lifespan(app: FastAPI):
 app=FastAPI(title="SciDemo API",version="0.1.0",description="科学计算教学 Agent 工作流 API",lifespan=lifespan,
             default_response_class=SafeJSONResponse)
 app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
+running_tasks: dict[str,asyncio.Task] = {}
+
+def launch(task_id: str, coroutine):
+    task=asyncio.create_task(coroutine); running_tasks[task_id]=task
+    task.add_done_callback(lambda finished: running_tasks.pop(task_id,None) if running_tasks.get(task_id) is finished else None)
 
 @app.get("/api/health")
 async def health(): return {"status":"ok","llm_provider":settings.llm_provider,"llm_model":settings.llm_model}
@@ -58,13 +63,14 @@ async def create_task(body: TaskCreate):
     task_id=str(uuid.uuid4())
     state: ScientificAgentState={"task_id":task_id,"user_query":body.query,"parsed_problem":{},"computation_mode":"",
       "plan":[],"current_step":0,"agent_steps":[],"pending_action":None,"review_completed":False,
+      "active_agent":"problem_analyst","agent_handoffs":[],
       "tool_calls":[],"observations":[],"verification_results":[],"artifacts":[],"messages":[],"model_calls":[],
       "status":"queued","requires_human_review":body.require_review,"human_feedback":None,"retry_count":0,
       "max_retries":body.max_retries,"tolerance":body.tolerance,"teaching_mode":body.teaching_mode,"use_local_model":body.use_local_model,
       "model_provider":"local-vllm" if body.use_local_model and settings.llm_provider.lower()!="mock" else "mock","final_answer":None,"error":None}
     store.save(task_id,state)
     await store.emit(task_id,"workflow_started",None,"工作流已启动","已分配独立 thread_id",{"thread_id":task_id})
-    asyncio.create_task(run_task(state,task_id))
+    launch(task_id,run_task(state,task_id))
     return {"task_id":task_id,"status":"queued"}
 
 @app.get("/api/tasks/{task_id}")
@@ -78,8 +84,19 @@ async def review(task_id: str, body: HumanFeedback):
     state=store.get(task_id)
     if not state: raise HTTPException(404,"任务不存在")
     if state.get("status")!="waiting_review": raise HTTPException(409,"任务当前不在等待审核状态")
-    asyncio.create_task(resume_task(task_id,body.model_dump()))
+    launch(task_id,resume_task(task_id,body.model_dump()))
     return {"task_id":task_id,"status":"resuming"}
+
+@app.post("/api/tasks/{task_id}/cancel",status_code=202)
+async def cancel_task(task_id: str):
+    state=store.get(task_id)
+    if not state: raise HTTPException(404,"任务不存在")
+    if state.get("status") in ("completed","failed","rejected","cancelled"): raise HTTPException(409,"任务已经结束")
+    task=running_tasks.get(task_id)
+    if task and not task.done(): task.cancel()
+    state.update({"status":"cancelled","error":"用户停止了模型生成"}); store.save(task_id,state)
+    await store.emit(task_id,"workflow_cancelled",None,"已停止生成","当前模型调用和 Agent 工作流已取消")
+    return {"task_id":task_id,"status":"cancelled"}
 
 @app.get("/api/tasks/{task_id}/events")
 async def task_events(task_id: str, after: int=Query(default=0,ge=0)):
@@ -90,13 +107,13 @@ async def task_events(task_id: str, after: int=Query(default=0,ge=0)):
         try:
             for item in store.events(task_id,last):
                 last=item['sequence']; yield f"id: {last}\ndata: {json.dumps(json_safe(item),ensure_ascii=False,allow_nan=False)}\n\n"
-            if (store.get(task_id) or {}).get('status') in ('completed','failed'): return
+            if (store.get(task_id) or {}).get('status') in ('completed','failed','cancelled'): return
             while True:
                 try: item=await asyncio.wait_for(queue.get(),15)
                 except asyncio.TimeoutError:
                     yield ": keep-alive\n\n"; continue
                 if item["sequence"]>last:
                     last=item["sequence"]; yield f"id: {last}\ndata: {json.dumps(json_safe(item),ensure_ascii=False,allow_nan=False)}\n\n"
-                if item["event_type"] in ("workflow_completed","workflow_failed"): break
+                if item["event_type"] in ("workflow_completed","workflow_failed","workflow_cancelled"): break
         finally: store.unsubscribe(task_id,queue)
     return StreamingResponse(stream(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})

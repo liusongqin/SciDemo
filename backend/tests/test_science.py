@@ -40,3 +40,27 @@ def test_plot_function_is_registered_and_executable():
 def test_plot_function_rejects_unbound_variables():
     with pytest.raises(ValueError,match="未赋值变量"):
         TOOLS["plot_function"](expression="y",start=0,end=4,variable="x",samples=25)
+
+def test_expression_transform_limit_and_multiple_integral():
+    assert TOOLS["transform_expression"]("(x+y)^2","expand")["expression"]=="x**2 + 2*x*y + y**2"
+    assert TOOLS["calculate_limit"]("sin(x)/x","x",0,"both")["expression"]=="1"
+    assert TOOLS["integrate_multiple"]("x+y",["x","y"],[0,0],[1,1])["expression"]=="1"
+
+def test_multivariate_derivative_and_symbolic_system():
+    derivative=TOOLS["multivariate_derivative"]("x^2+x*y+y^2",["x","y"],"hessian")
+    assert derivative["shape"]==[2,2]
+    system=TOOLS["solve_symbolic_system"](["x+y-2","x-y"],["x","y"])
+    assert system["solutions"]==[{"x":"1","y":"1"}]
+
+def test_matrix_operations_and_symbolic_ode():
+    assert TOOLS["matrix_calculation"]("determinant",[[1,2],[3,4]])["result"]=="-2"
+    solved=TOOLS["matrix_calculation"]("solve_linear",[[2,0],[0,4]],vector=[6,8])
+    assert solved["result"]==[["3"],["2"]]
+    ode=TOOLS["solve_symbolic_ode"]("y",y0=2,t0=0)
+    assert "2*exp(t)" in ode["solution_expression"]
+
+def test_implicit_and_surface_plots():
+    implicit=TOOLS["plot_implicit"]("x^2+y^2-1",[-2,2],[-2,2],30)
+    surface=TOOLS["plot_surface"]("x^2+y^2",[-1,1],[-1,1],20)
+    assert implicit["data"][0]["type"]=="contour" and len(implicit["data"][0]["z"])==30
+    assert surface["data"][0]["type"]=="surface" and len(surface["data"][0]["z"])==20

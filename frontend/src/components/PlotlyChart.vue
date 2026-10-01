@@ -5,6 +5,7 @@ type Dict = Record<string, any>
 const props = defineProps<{ artifact: Dict }>()
 const chartEl = ref<HTMLElement|null>(null)
 let plotly: any = null
+let resizeObserver: ResizeObserver|null = null
 const points = computed(() => props.artifact?.data?.[0]?.x?.length || 0)
 const isSingleRootPoint = computed(() => props.artifact?.source_tool==='find_root' && points.value<2)
 const iteration = computed(() => props.artifact?.data?.[0]?.x?.[0])
@@ -23,7 +24,13 @@ async function renderChart(){
 
 watch(()=>props.artifact,renderChart,{deep:true})
 onMounted(renderChart)
-onBeforeUnmount(()=>{ if(chartEl.value && plotly)plotly.purge(chartEl.value) })
+onMounted(()=>{
+  resizeObserver=new ResizeObserver(entries=>{
+    if(entries.some(entry=>entry.contentRect.width>0) && chartEl.value && plotly) plotly.Plots.resize(chartEl.value)
+  })
+  if(chartEl.value) resizeObserver.observe(chartEl.value)
+})
+onBeforeUnmount(()=>{ resizeObserver?.disconnect(); if(chartEl.value && plotly)plotly.purge(chartEl.value) })
 </script>
 
 <template>

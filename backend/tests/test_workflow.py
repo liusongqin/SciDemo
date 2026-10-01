@@ -1,8 +1,8 @@
-import math, uuid
+import asyncio, math, uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 from langgraph.types import Command
-from app.main import app
+from app.main import app, running_tasks
 from app.storage import store
 from app import workflow
 from app.workflow import run_task
@@ -34,6 +34,19 @@ async def test_health_api():
         assert (await client.get("/api/health")).json()["status"]=="ok"
 
 @pytest.mark.asyncio
+async def test_cancel_running_generation():
+    state=initial("取消一个正在生成的报告")
+    state["status"]="running"; store.save(state["task_id"],state)
+    sleeper=asyncio.create_task(asyncio.sleep(60)); running_tasks[state["task_id"]]=sleeper
+    async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+        response=await client.post(f"/api/tasks/{state['task_id']}/cancel")
+    await asyncio.sleep(0)
+    assert response.status_code==202
+    assert sleeper.cancelled()
+    assert store.get(state["task_id"])["status"]=="cancelled"
+    assert store.events(state["task_id"])[-1]["event_type"]=="workflow_cancelled"
+
+@pytest.mark.asyncio
 async def test_task_api_serializes_non_finite_verification_values_as_null():
     state=initial("工具执行失败")
     state["verification_results"]=[{"passed":False,"value":math.inf}]
@@ -53,6 +66,23 @@ async def test_mock_end_to_end_and_event_history():
     data=store.get(state["task_id"]); events=store.events(state["task_id"])
     assert data["status"]=="completed" and data["verification_results"][-1]["passed"]
     assert data["artifacts"] and any(e["event_type"]=="tool_completed" for e in events)
+    assert data["active_agent"]=="report_writer"
+    assert [(item["from"],item["to"]) for item in data["agent_handoffs"]]==[
+        ("problem_analyst","scientific_solver"),
+        ("scientific_solver","verification_critic"),
+        ("verification_critic","scientific_solver"),
+        ("scientific_solver","report_writer"),
+    ]
+    assert len([e for e in events if e["event_type"]=="agent_handoff"])==4
+    assert "verification_review" in [call["stage"] for call in data["model_calls"]]
+    assert "synthesize" in [call["stage"] for call in data["model_calls"]]
+    verification=data["verification_results"][-1]
+    assert verification["program_passed"] is True
+    assert verification["agent_approved"] is True
+    assert verification["agent_review"]["recommendation"]=="accept_step"
+    report_handoff=next(i for i,event in enumerate(events) if event["event_type"]=="agent_handoff" and event["payload"].get("to")=="report_writer")
+    report_finished=next(i for i,event in enumerate(events) if event["event_type"]=="model_completed" and event["node"]=="report_writer")
+    assert report_handoff < report_finished
 
 @pytest.mark.asyncio
 async def test_verification_failure_retries():
