@@ -6,6 +6,7 @@ from app.main import app
 from app.storage import store
 from app import workflow
 from app.workflow import run_task
+from app.llm import public_text
 
 def initial(query: str, review=False):
     task_id=str(uuid.uuid4())
@@ -111,3 +112,31 @@ async def test_invalid_model_arguments_are_returned_for_self_correction(monkeypa
     data=store.get(state["task_id"])
     assert data["status"]=="completed" and len(data["tool_calls"])==2
     assert data["tool_calls"][0]["result"]["stage"]=="argument_validation"
+
+def test_public_text_removes_controller_wording():
+    assert public_text("给用户展示已验证的插值结果")=="展示已验证的插值结果"
+    assert public_text("我将调用插值工具")=="调用插值工具"
+
+@pytest.mark.asyncio
+async def test_auto_visualization_prevents_redundant_plot(monkeypatch):
+    class RedundantPlotModel:
+        provider="test"; model="redundant-plot"
+        async def analyze(self,query,fallback):
+            record={"stage":"understand","provider":"test","model":self.model,"duration_ms":0,"response_summary":"ok"}
+            return {**fallback,"kind":"interpolation","computation_mode":"numeric","decision_summary":"插值"},record
+        async def decide(self,query,parsed,history,suggested):
+            record={"stage":"agent_decision","provider":"test","model":self.model,"duration_ms":0,"response_summary":"next"}
+            if not history:
+                return {"action":"call_tool","id":"interpolate","name":"interpolate_data","arguments":{"x":[0,1,2],"y":[0,1,0],"method":"cubic"},"decision_summary":"插值"},record
+            return {"action":"call_tool","id":"bad_plot","name":"plot_function","arguments":{"expression":"x**2","start":0,"end":2,"variable":"x"},"decision_summary":"给用户展示图像"},record
+        async def synthesize(self,query,history,reason):
+            record={"stage":"synthesize","provider":"test","model":self.model,"duration_ms":0,"response_summary":"done"}
+            return "插值与图表已完成。",record
+    monkeypatch.setattr(workflow,"model_for",lambda state:RedundantPlotModel())
+    state=initial("对 x=[0,1,2], y=[0,1,0] 三次样条插值并画图")
+    await run_task(state,state["task_id"])
+    data=store.get(state["task_id"])
+    assert data["status"]=="completed"
+    assert [call["tool"] for call in data["tool_calls"]]==["interpolate_data"]
+    assert len(data["artifacts"])==1
+    assert any(event["event_type"]=="redundant_action_skipped" for event in store.events(state["task_id"]))

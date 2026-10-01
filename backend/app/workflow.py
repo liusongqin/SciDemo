@@ -89,8 +89,23 @@ def agent_history(state):
     for call in state.get("tool_calls",[]):
         check=next((item for item in checks if item.get("call_id")==call.get("id")),{})
         history.append({"id":call.get("id"),"tool":call["tool"],"arguments":call["arguments"],"result":call.get("result",{}),
-                        "verification":check})
+                        "verification":check,
+                        "visualization_created":bool(check.get("passed") and call["tool"] in
+                          {"find_root","interpolate_data","fit_curve","solve_ode","plot_function"})})
     return history
+
+def redundant_action_reason(state, action, history):
+    """Return why a proposed call must not run, or an empty string."""
+    if action.get("action")!="call_tool": return ""
+    name,args=action.get("name"),action.get("arguments",{})
+    verified=[item for item in history if item.get("verification",{}).get("passed")]
+    if any(item.get("tool")==name and item.get("arguments")==args for item in verified):
+        return f"已有参数相同且通过验证的 {name} 记录"
+    kind=state.get("parsed_problem",{}).get("kind")
+    auto_tool={"interpolation":"interpolate_data","fit":"fit_curve","ode":"solve_ode"}.get(kind)
+    if name=="plot_function" and auto_tool and any(item.get("tool")==auto_tool for item in verified):
+        return f"{auto_tool} 已自动生成结果图"
+    return ""
 
 def fallback_answer(state):
     passed=[x for x in agent_history(state) if x.get("verification",{}).get("passed")]
@@ -121,6 +136,20 @@ async def agent_decide(state):
     try: action,record=await model.decide(state["user_query"],state["parsed_problem"],history,suggested_args(state))
     except Exception as exc:
         model=await model_failure(state,"agent_decide","agent_decision",exc); action,record=await model.decide(state["user_query"],state["parsed_problem"],history,suggested_args(state))
+    redundant=redundant_action_reason(state,action,history)
+    if redundant:
+        await event(state,"agent_decide","redundant_action_skipped","已跳过冗余动作",redundant,
+                    {"tool":action.get("name"),"arguments":action.get("arguments",{})})
+        try:
+            answer,summary_record=await model.synthesize(state["user_query"],history,f"已完成目标；未执行冗余动作：{redundant}")
+            await event(state,"agent_decide","model_completed","综合回答已生成",summary_record["response_summary"],summary_record,summary_record["duration_ms"])
+            model_calls=[*state.get("model_calls",[]),record,summary_record]
+        except Exception as exc:
+            answer=fallback_answer(state)
+            await event(state,"agent_decide","model_failed","综合回答生成失败",str(exc),{"stage":"synthesize"})
+            model_calls=[*state.get("model_calls",[]),record]
+        return {"pending_action":{"action":"finish"},"final_answer":answer,"status":"running",
+                "model_calls":model_calls}
     if action.get("action")=="call_tool":
         action.setdefault("id",f"science_call_{current+1}"); raw_arguments=action.get("arguments",{})
         try:

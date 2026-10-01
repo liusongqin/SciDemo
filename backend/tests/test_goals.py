@@ -24,3 +24,9 @@ def test_explicit_multistep_goals_are_tracked():
 def test_failed_calls_do_not_satisfy_goals():
     missing=missing_tool_goals(QUERY,[item("plot_function",False)])
     assert any("绘制" in goal for goal in missing)
+
+
+def test_auto_visualized_interpolation_satisfies_draw_chart_goal():
+    query="对数据进行三次样条插值并画图"
+    assert requested_tool_counts(query)["plot_function"]==1
+    assert missing_tool_goals(query,[item("interpolate_data")])==[]

@@ -29,6 +29,13 @@ for _spec in TOOL_SPECS:
     }
 TOOL_NAMES={item["function"]["name"] for item in TOOL_SPECS}
 
+def public_text(value: Any) -> str:
+    """Turn model prose into UI copy rather than exposing controller wording."""
+    text=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(value or "")).strip()
+    text=re.sub(r"^(?:我(?:将|会|需要)|接下来(?:我将)?)[，,:\s]*","",text)
+    text=re.sub(r"^(?:向|给)用户(?=(?:展示|说明|呈现|提供|返回))","",text)
+    return text
+
 def first_tool_call(tool_calls: list[dict[str,Any]]) -> tuple[dict[str,Any], int]:
     """Keep execution sequential even when a model batches several calls."""
     if not tool_calls: raise ValueError("模型没有生成工具调用")
@@ -132,7 +139,7 @@ class OpenAICompatibleModel:
             AIMessage(content="",tool_calls=[{"id":call_id,"name":call["tool"],"args":call["arguments"]}]),
             ToolMessage(content=json.dumps(call["result"],ensure_ascii=False),tool_call_id=call_id),
             HumanMessage(content=prompt)])
-        answer=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip() or fallback
+        answer=public_text(msg.content) or fallback
         return answer,_record("explain",started,"根据程序验证证据生成教学解释",self.provider,self.model)
     async def decide(self,query,parsed,history,suggested):
         started=time.perf_counter(); first=not history
@@ -141,7 +148,8 @@ class OpenAICompatibleModel:
         for item in history:
             result=json.dumps(item.get("result",{}),ensure_ascii=False,default=str)
             compact.append({"tool":item.get("tool"),"arguments":item.get("arguments",{}),
-                            "result_summary":result[:500],"verification":item.get("verification",{})})
+                            "result_summary":result[:500],"verification":item.get("verification",{}),
+                            "visualization_created":bool(item.get("visualization_created"))})
         missing=missing_tool_goals(query,history)
         prompt=f"""你是一个能自主规划的科学计算 Agent。根据用户目标和工具观察，决定下一步。
 你可以连续调用多个工具；只有证据充分时才直接给出最终中文 Markdown 回答。
@@ -151,7 +159,8 @@ class OpenAICompatibleModel:
 完整执行账本（不要重复已验证的调用）: {json.dumps(compact,ensure_ascii=False)}
 尚未完成的显式目标: {json.dumps(missing,ensure_ascii=False)}
 精度参考: {suggested.get('tolerance',1e-8)}
-必须逐项完成用户的编号要求；只有“尚未完成的显式目标”为空时才能结束。如果要求绘图，必须实际调用 plot_function，求根迭代残差图不能代替函数图像。
+必须逐项完成用户的编号要求；只有“尚未完成的显式目标”为空时才能结束。
+插值、拟合和 ODE 工具会自动生成结果图；账本中 visualization_created 为 true 时不得再调用 plot_function。只有用户要求独立解析函数图像且尚未绘制时才调用 plot_function；求根迭代残差图不能代替函数图像。
 若需要继续，请调用一个最合适的工具，并在 decision_summary 参数中写一句可公开展示的 Markdown 决策说明。若任务已完成，请直接输出最终答案，不要调用工具。"""
         messages=[SystemMessage(content="你控制科学计算工作流。工具白名单和程序验证是不可绕过的安全边界。"),HumanMessage(content=query)]
         for item in history[-2:]:
@@ -163,14 +172,14 @@ class OpenAICompatibleModel:
         if msg.tool_calls:
             item,deferred=first_tool_call(msg.tool_calls)
             if item["name"] not in TOOL_NAMES: raise ValueError(f"模型选择了未注册工具: {item['name']}")
-            args=dict(item.get("args",{})); public_summary=str(args.pop("decision_summary","")).strip()
-            visible_content=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content or "")).strip()
+            args=dict(item.get("args",{})); public_summary=public_text(args.pop("decision_summary",""))
+            visible_content=public_text(msg.content)
             summary=public_summary or visible_content[:600] or f"模型决定调用 `{item['name']}` 继续求解。"
             if deferred: summary+=f" 模型同时建议了另外 {deferred} 个调用；为了逐步验证，将在后续轮次重新规划。"
             action={"action":"call_tool","id":item.get("id") or f"science_call_{len(history)+1}","name":item["name"],
                     "arguments":args,"decision_summary":summary}
         else:
-            answer=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip()
+            answer=public_text(msg.content)
             if not answer: raise ValueError("模型既未调用工具，也未给出最终答案")
             action={"action":"finish","answer":answer,"decision_summary":"模型根据现有工具观察决定结束任务"}
         return action,_record("agent_decision",started,action["decision_summary"],self.provider,self.model)
@@ -195,14 +204,14 @@ class OpenAICompatibleModel:
         client=self.client.bind(max_tokens=max(settings.llm_max_tokens,2048))
         system=SystemMessage(content="你是科学计算结果汇总器，必须完整回答用户的每项要求。")
         msg=await client.ainvoke([system,HumanMessage(content=prompt)])
-        answer=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip()
+        answer=public_text(msg.content)
         continuations=0
         while msg.response_metadata.get("finish_reason") in ("length","max_tokens") and continuations<2:
             continuation_prompt=f"""上一段回答因长度限制被截断。请从断点处继续，不要重复已有内容，必须补齐尚未回答的编号要求并完整收尾。
 已有回答：
 {answer}"""
             msg=await client.ainvoke([system,HumanMessage(content=continuation_prompt)])
-            continuation=re.sub(r"<think>[\s\S]*?(?:</think>|$)","",str(msg.content)).strip()
+            continuation=public_text(msg.content)
             if not continuation: break
             answer+=f"\n\n{continuation}"; continuations+=1
         if not answer: raise ValueError("模型未生成综合回答")
