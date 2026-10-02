@@ -7,6 +7,7 @@ from app.storage import store
 from app import workflow
 from app.workflow import run_task
 from app.llm import public_text
+from app.config import settings
 
 def initial(query: str, review=False):
     task_id=str(uuid.uuid4())
@@ -32,6 +33,45 @@ def test_fallback_answer_includes_every_verified_result():
 async def test_health_api():
     async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
         assert (await client.get("/api/health")).json()["status"]=="ok"
+
+@pytest.mark.asyncio
+async def test_guest_can_create_and_list_empty_conversation():
+    async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+        identity=(await client.get("/api/auth/me")).json()
+        created=(await client.post("/api/conversations")).json()
+        conversations=(await client.get("/api/conversations")).json()
+    assert identity["kind"]=="guest"
+    assert any(item["conversation_id"]==created["conversation_id"] for item in conversations)
+
+@pytest.mark.asyncio
+async def test_guest_can_rename_and_delete_own_conversation():
+    async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+        await client.get("/api/auth/me")
+        created=(await client.post("/api/conversations")).json(); conversation_id=created["conversation_id"]
+        renamed=await client.patch(f"/api/conversations/{conversation_id}",json={"title":"极限计算"})
+        deleted=await client.delete(f"/api/conversations/{conversation_id}")
+        conversations=(await client.get("/api/conversations")).json()
+    assert renamed.status_code==200 and renamed.json()["title"]=="极限计算"
+    assert deleted.status_code==204
+    assert not any(item["conversation_id"]==conversation_id for item in conversations)
+
+@pytest.mark.asyncio
+async def test_cas_login_uses_browser_origin_for_service_callback(monkeypatch):
+    monkeypatch.setattr(settings, "buaa_direct_auth", True)
+    async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test",follow_redirects=False) as client:
+        response=await client.get("/api/auth/cas/login",params={"origin":"http://192.168.1.8:5173"})
+    assert response.status_code==302
+    assert "service=http%3A%2F%2F192.168.1.8%3A5173%2Fapi%2Fauth%2Fcas%2Fcallback" in response.headers["location"]
+    assert "scidemo_cas_service=" in response.headers["set-cookie"]
+
+@pytest.mark.asyncio
+async def test_buaa_login_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(settings, "buaa_direct_auth", False)
+    async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+        identity=(await client.get("/api/auth/me")).json()
+        response=await client.post("/api/auth/prelogin")
+    assert identity["kind"]=="guest" and identity["login_enabled"] is False
+    assert response.status_code==503
 
 @pytest.mark.asyncio
 async def test_cancel_running_generation():
@@ -83,6 +123,15 @@ async def test_mock_end_to_end_and_event_history():
     report_handoff=next(i for i,event in enumerate(events) if event["event_type"]=="agent_handoff" and event["payload"].get("to")=="report_writer")
     report_finished=next(i for i,event in enumerate(events) if event["event_type"]=="model_completed" and event["node"]=="report_writer")
     assert report_handoff < report_finished
+
+@pytest.mark.asyncio
+async def test_greeting_uses_general_route_without_science_agents():
+    state=initial("你好呀")
+    await run_task(state,state["task_id"])
+    data=store.get(state["task_id"]); events=store.events(state["task_id"])
+    assert data["status"]=="completed" and data["workflow_kind"]=="general"
+    assert data["final_answer"] and not data.get("agent_handoffs")
+    assert not any(item["event_type"]=="agent_handoff" for item in events)
 
 @pytest.mark.asyncio
 async def test_verification_failure_retries():

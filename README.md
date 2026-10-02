@@ -61,7 +61,30 @@ LLM_BASE_URL=http://127.0.0.1:8001/v1
 LLM_API_KEY=local
 ```
 
-`.env` 在后端启动时自动加载。模型不可用会明确失败；只有显式设置 `LLM_FALLBACK_TO_MOCK=true` 才允许回退，并产生回退事件。离线测试使用 `use_local_model=false`。密钥只放 `.env`，不要提交。
+`.env` 在后端启动时自动加载。模型不可用会明确失败；只有显式设置 `LLM_FALLBACK_TO_MOCK=true` 才允许回退，并产生回退事件。离线测试使用 Mock。密钥只放 `.env`，不要提交。
+
+也可以配置任意兼容 OpenAI Chat Completions 和工具调用协议的外部模型，并在聊天输入框选择“外部 API”：
+
+```text
+EXTERNAL_LLM_MODEL=your-model
+EXTERNAL_LLM_BASE_URL=https://provider.example/v1
+EXTERNAL_LLM_API_KEY=secret
+```
+
+## 登录、游客与会话历史
+
+首次访问会创建带 HttpOnly 会话 Cookie 的游客身份；游客和已登录用户的任务均按身份隔离，并可在左侧恢复多次历史会话。当前登录采用与 UBAA 类似的服务端中转模式：先读取统一认证登录上下文和验证码，再将用户本次输入的学号、密码、验证码提交至北航 SSO，最后通过 `uc.buaa.edu.cn/api/uc/status` 校验身份。密码不落库、不写日志，也不会进入任务状态。
+
+```text
+BUAA_CAS_BASE_URL=https://sso.buaa.edu.cn
+BUAA_CAS_SERVICE_URL=https://your-domain.example/api/auth/cas/callback
+FRONTEND_URL=https://your-domain.example
+SESSION_COOKIE_SECURE=true
+```
+
+该模式不要求登记 CAS Service URL，但业务服务器会在认证期间接触用户密码，正式部署必须使用 HTTPS、限制日志和访问权限，并在隐私声明中明确说明。认证页面结构变化时，预登录解析器也需要同步维护。
+
+当前开发环境继续使用 SQLite 保存身份、会话、任务和事件，便于单机启动。多实例生产部署建议把持久数据迁至 MySQL/PostgreSQL，把短期会话、SSE 分发和任务锁迁至 Redis；在完成数据库迁移和并发一致性测试前，不应只通过修改连接字符串宣称已支持多实例。
 
 ## 课堂演示
 

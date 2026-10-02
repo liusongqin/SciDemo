@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json, re, time
-from typing import Any, Protocol
+from typing import Any, AsyncIterator, Protocol
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -37,9 +37,9 @@ for _spec in TOOL_SPECS:
         "type":"string","description":"用 Markdown 写一句可公开展示的选择理由，不含隐藏思维链"
     }
 TOOL_NAMES={item["function"]["name"] for item in TOOL_SPECS}
-DECISION_MAX_TOKENS=2048
-ANALYSIS_MAX_TOKENS=1024
-REPORT_MAX_TOKENS=3072
+DECISION_MAX_TOKENS=1024
+ANALYSIS_MAX_TOKENS=768
+REPORT_MAX_TOKENS=2048
 
 def public_text(value: Any) -> str:
     """Turn model prose into UI copy rather than exposing controller wording."""
@@ -56,6 +56,8 @@ def first_tool_call(tool_calls: list[dict[str,Any]]) -> tuple[dict[str,Any], int
 class ModelAdapter(Protocol):
     provider: str
     model: str
+    async def route(self, query: str) -> tuple[dict[str,Any],dict[str,Any]]: ...
+    def stream_general(self, query: str) -> AsyncIterator[str]: ...
     async def analyze(self, query: str, fallback: dict[str,Any]) -> tuple[dict[str,Any],dict[str,Any]]: ...
     async def select_tool(self, query: str, parsed: dict[str,Any], suggested: dict[str,Any]) -> tuple[dict[str,Any],dict[str,Any]]: ...
     async def explain(self, context: dict[str,Any], fallback: str) -> tuple[str,dict[str,Any]]: ...
@@ -69,6 +71,15 @@ def _record(stage: str, started: float, response: str, provider: str, model: str
 
 class MockModel:
     provider="mock"; model="deterministic-classroom-model"
+    async def route(self,query):
+        started=time.perf_counter()
+        scientific=bool(re.search(r"[=+*/^]|方程|函数|求导|积分|极限|矩阵|拟合|插值|ODE|微分|绘图|计算|数值|符号",query,re.I))
+        answer="你好！我可以帮你完成方程、微积分、矩阵、拟合、ODE 和科学绘图等任务。" if not scientific else ""
+        return {"scientific":scientific,"answer":answer},_record("intent_route",started,"科学计算" if scientific else "普通对话",self.provider,self.model)
+    async def stream_general(self,query):
+        answer="你好！我可以帮你完成方程、微积分、矩阵、拟合、ODE 和科学绘图等任务。"
+        for index in range(0,len(answer),4):
+            yield answer[index:index+4]
     async def analyze(self,query,fallback):
         started=time.perf_counter(); data={**fallback,"decision_summary":f"识别任务并候选工具 {fallback['tool']}"}
         return data,_record("understand",started,data["decision_summary"],self.provider,self.model)
@@ -115,14 +126,36 @@ def _json_object(text: str) -> dict[str,Any]:
 
 class OpenAICompatibleModel:
     provider="local-vllm"
-    def __init__(self):
+    def __init__(self, external: bool=False):
         sync_http=httpx.Client(trust_env=False)
         async_http=httpx.AsyncClient(trust_env=False)
-        self.model=settings.llm_model
-        self.client=ChatOpenAI(model=settings.llm_model,api_key=settings.llm_api_key or "local",base_url=settings.llm_base_url,
+        self.provider="external-api" if external else "local-vllm"
+        self.model=settings.external_llm_model if external else settings.llm_model
+        api_key=settings.external_llm_api_key if external else (settings.llm_api_key or "local")
+        base_url=settings.external_llm_base_url if external else settings.llm_base_url
+        if external and (not self.model or not api_key): raise ValueError("外部模型 API 尚未配置")
+        self.client=ChatOpenAI(model=self.model,api_key=api_key,base_url=base_url,
           temperature=0,max_tokens=min(settings.llm_max_tokens,DECISION_MAX_TOKENS),timeout=settings.llm_timeout_seconds,max_retries=1,
           http_client=sync_http,http_async_client=async_http,
           extra_body={"chat_template_kwargs":{"enable_thinking":False}})
+    async def route(self,query):
+        started=time.perf_counter()
+        prompt=f"""判断用户当前消息是否需要进入科学计算工具工作流，只输出 JSON。
+字段：scientific（布尔值）、answer（字符串）。
+需要数学/科学计算、数据处理、方程、微积分、矩阵、拟合、ODE 或绘图时 scientific=true 且 answer 为空。
+问候、闲聊、能力询问或不需要计算的普通问题时 scientific=false，并在 answer 中直接简洁回答。
+消息：{query[-3000:]}"""
+        msg=await self.client.bind(max_tokens=256).ainvoke([SystemMessage(content="你是请求入口路由器。只返回 JSON，不展示推理。"),HumanMessage(content=prompt)])
+        data=_json_object(str(msg.content)); data["scientific"]=bool(data.get("scientific")); data["answer"]=public_text(data.get("answer"))
+        return data,_record("intent_route",started,"科学计算" if data["scientific"] else "普通对话",self.provider,self.model)
+    async def stream_general(self,query):
+        prompt=f"""请直接自然地回答用户，不要展示思维链。若用户只是问候，可简短回应并说明你擅长科学计算。\n用户消息：{query[-6000:]}"""
+        async for chunk in self.client.bind(max_tokens=min(settings.llm_max_tokens,1024)).astream([
+            SystemMessage(content="你是科学计算助手，也可以进行简洁的普通对话。"),
+            HumanMessage(content=prompt),
+        ]):
+            content=chunk.content
+            if isinstance(content,str) and content: yield content
     async def analyze(self,query,fallback):
         started=time.perf_counter()
         prompt=f"""分析下面的科学计算题，只输出一个 JSON 对象，不要输出推理过程。
@@ -165,10 +198,13 @@ class OpenAICompatibleModel:
         compact=[]
         for item in history:
             result=json.dumps(item.get("result",{}),ensure_ascii=False,default=str)
-            compact.append({"tool":item.get("tool"),"arguments":item.get("arguments",{}),
+            arguments=json.dumps(item.get("arguments",{}),ensure_ascii=False,default=str)
+            compact.append({"tool":item.get("tool"),"arguments_summary":arguments[:500],
                             "result_summary":result[:500],"verification":item.get("verification",{}),
                             "visualization_created":bool(item.get("visualization_created"))})
-        missing=missing_tool_goals(query,history)
+        # Conversational context may mention goals from earlier turns. Only the
+        # current turn's raw request may create mandatory completion goals.
+        missing=missing_tool_goals(parsed.get("raw",query),history)
         prompt=f"""你是一个能自主规划的科学计算 Agent。根据用户目标和工具观察，决定下一步。
 你可以连续调用多个工具；只有证据充分时才直接给出最终中文 Markdown 回答。
 不得编造工具结果，不得声称未通过的验证已经通过。不要展示隐藏思维链，只给简短公开决策摘要。
@@ -181,10 +217,10 @@ class OpenAICompatibleModel:
 插值、拟合和 ODE 工具会自动生成结果图；账本中 visualization_created 为 true 时不得再调用 plot_function。只有用户要求独立解析函数图像且尚未绘制时才调用 plot_function；求根迭代残差图不能代替函数图像。
 若需要继续，请调用一个最合适的工具，并在 decision_summary 参数中写一句可公开展示的 Markdown 决策说明。若任务已完成，请直接输出最终答案，不要调用工具。"""
         messages=[SystemMessage(content="你控制科学计算工作流。工具白名单和程序验证是不可绕过的安全边界。"),HumanMessage(content=query)]
-        for item in history[-2:]:
+        for item in history[-1:]:
             call_id=item.get("id") or "science_call"
             messages.extend([AIMessage(content="",tool_calls=[{"id":call_id,"name":item["tool"],"args":item.get("arguments",{})}]),
-                             ToolMessage(content=json.dumps({"result":item.get("result"),"verification":item.get("verification")},ensure_ascii=False,default=str)[:2500],tool_call_id=call_id)])
+                             ToolMessage(content=json.dumps({"result":item.get("result"),"verification":item.get("verification")},ensure_ascii=False,default=str)[:1200],tool_call_id=call_id)])
         messages.append(HumanMessage(content=prompt))
         msg: AIMessage=await bound.ainvoke(messages)
         if msg.tool_calls:
@@ -223,8 +259,9 @@ class OpenAICompatibleModel:
         for index,item in enumerate(history,1):
             if not item.get("verification",{}).get("passed"): continue
             result=json.dumps(item.get("result",{}),ensure_ascii=False,default=str)
-            records.append({"step":index,"tool":item.get("tool"),"arguments":item.get("arguments",{}),
-                            "result":result[:1400],"verification":item.get("verification",{})})
+            arguments=json.dumps(item.get("arguments",{}),ensure_ascii=False,default=str)
+            records.append({"step":index,"tool":item.get("tool"),"arguments_summary":arguments[:500],
+                            "result":result[:900],"verification":item.get("verification",{})})
         prompt=f"""请根据全部已验证记录，回答用户的原始问题。
 用户问题: {query}
 已验证记录: {json.dumps(records,ensure_ascii=False)}
@@ -253,6 +290,6 @@ class OpenAICompatibleModel:
         summary="基于全部已验证记录生成最终回答"+(f"，自动续写 {continuations} 次" if continuations else "")
         return answer,_record("synthesize",started,summary,self.provider,self.model)
 
-def get_model(use_local_model: bool=True) -> ModelAdapter:
-    if not use_local_model or settings.llm_provider.lower()=="mock": return MockModel()
-    return OpenAICompatibleModel()
+def get_model(backend: str|bool="local") -> ModelAdapter:
+    if backend is False or backend=="mock" or settings.llm_provider.lower()=="mock": return MockModel()
+    return OpenAICompatibleModel(external=backend=="external")

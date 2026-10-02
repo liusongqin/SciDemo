@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, math, re, time
+import asyncio, json, math, re, time
 from typing import Any
 import sympy as sp
 from langgraph.checkpoint.memory import MemorySaver
@@ -10,7 +10,7 @@ from .agents import (ANALYST, CRITIC, REPORTER, SOLVER, handoff_record,
                      verification_critic)
 from .config import settings
 from .goals import missing_tool_goals
-from .llm import MockModel, get_model
+from .llm import MockModel, get_model, public_text
 from .models import ScientificAgentState
 from .registry import validate_call
 from .science import ALLOWED_NAMES, TOOLS, plot_artifact, safe_expression
@@ -80,7 +80,19 @@ async def handoff(state, source, target, reason):
     await event(state,target.key,"agent_handoff",f"{source.name} → {target.name}",reason,record)
     return [*state.get("agent_handoffs",[]),record]
 
-def model_for(state): return get_model(bool(state.get("use_local_model",True)))
+def model_for(state): return get_model(state.get("model_backend") or ("local" if state.get("use_local_model",True) else "mock"))
+
+def model_query(state: ScientificAgentState) -> str:
+    """Build bounded conversational context without replaying event/tool traces."""
+    parts=[]
+    if state.get("conversation_summary"):
+        parts.append(f"较早对话摘要：\n{state['conversation_summary']}")
+    for index,turn in enumerate(state.get("conversation_history",[])[-2:],1):
+        verified=json.dumps(turn.get("verified",[]),ensure_ascii=False,default=str)
+        parts.append(f"第 {index} 轮用户：{turn.get('user','')}\n第 {index} 轮回答：{turn.get('assistant','')}\n已验证结果摘要：{verified}")
+    parts.append(f"当前用户问题：{state['user_query']}")
+    # Keep the newest material when the accumulated context reaches the budget.
+    return "\n\n".join(parts)[-3500:]
 
 async def model_failure(state,node,stage,exc):
     await event(state,node,"model_failed","本地模型调用失败",str(exc),{"stage":stage,"provider":state.get("model_provider")})
@@ -92,9 +104,9 @@ async def understand_problem(state):
     await event(state,ANALYST.key,"node_started","Problem Analyst 理解用户目标","提取计算对象、约束和预期输出",{"agent":ANALYST.key})
     fallback=understand(state["user_query"]); model=model_for(state)
     await event(state,ANALYST.key,"model_started","模型分析问题","建立首轮任务上下文",{"provider":model.provider,"model":model.model,"stage":"understand"})
-    try: parsed,record=await problem_analyst.analyze(model,state["user_query"],fallback)
+    try: parsed,record=await problem_analyst.analyze(model,model_query(state),fallback)
     except Exception as exc:
-        model=await model_failure(state,ANALYST.key,"understand",exc); parsed,record=await problem_analyst.analyze(model,state["user_query"],fallback)
+        model=await model_failure(state,ANALYST.key,"understand",exc); parsed,record=await problem_analyst.analyze(model,model_query(state),fallback)
     kind=normalize_kind(parsed.get("kind",fallback["kind"]),parsed.get("computation_mode",fallback["mode"]),fallback["kind"])
     parsed.update({"kind":kind,"tool":KIND_TOOL[kind],"mode":parsed.get("computation_mode",fallback["mode"]),"raw":state["user_query"]})
     summary=parsed.get("decision_summary",f"识别为 {kind} 任务")
@@ -151,7 +163,7 @@ async def agent_decide(state):
             model=model_for(state)
             try:
                 await event(state,REPORTER.key,"model_started","Report Writer 正在生成报告","正在读取全部已验证记录并组织最终回答",{"stage":"synthesize","agent":REPORTER.key})
-                answer,record=await report_writer.write(model,state["user_query"],history,f"已完成显式目标，并达到 {settings.max_tool_steps} 次工具调用上限")
+                answer,record=await report_writer.write(model,model_query(state),history,f"已完成显式目标，并达到 {settings.max_tool_steps} 次工具调用上限")
                 model_calls=[*model_calls,record]
                 await event(state,REPORTER.key,"model_completed","Report Writer 已生成最终报告",record["response_summary"],record,record["duration_ms"])
             except Exception as exc:
@@ -161,9 +173,9 @@ async def agent_decide(state):
                 "model_calls":model_calls,"agent_handoffs":handoffs,"active_agent":active_agent}
     await event(state,"agent_decide","node_started","Agent 正在决定下一步","读取最近的工具观察和验证证据")
     model=model_for(state); history=agent_history(state)
-    try: action,record=await scientific_solver.decide(model,state["user_query"],state["parsed_problem"],history,suggested_args(state))
+    try: action,record=await scientific_solver.decide(model,model_query(state),state["parsed_problem"],history,suggested_args(state))
     except Exception as exc:
-        model=await model_failure(state,SOLVER.key,"agent_decision",exc); action,record=await scientific_solver.decide(model,state["user_query"],state["parsed_problem"],history,suggested_args(state))
+        model=await model_failure(state,SOLVER.key,"agent_decision",exc); action,record=await scientific_solver.decide(model,model_query(state),state["parsed_problem"],history,suggested_args(state))
     redundant=redundant_action_reason(state,action,history)
     if redundant:
         await event(state,"agent_decide","redundant_action_skipped","已跳过冗余动作",redundant,
@@ -171,7 +183,7 @@ async def agent_decide(state):
         handoffs=await handoff(state,SOLVER,REPORTER,"已确认无需重复执行，交由报告 Agent 汇总现有证据")
         try:
             await event(state,REPORTER.key,"model_started","Report Writer 正在生成报告","正在读取全部已验证记录并组织最终回答",{"stage":"synthesize","agent":REPORTER.key})
-            answer,summary_record=await report_writer.write(model,state["user_query"],history,f"已完成目标；未执行冗余动作：{redundant}")
+            answer,summary_record=await report_writer.write(model,model_query(state),history,f"已完成目标；未执行冗余动作：{redundant}")
             await event(state,REPORTER.key,"model_completed","Report Writer 已生成最终报告",summary_record["response_summary"],summary_record,summary_record["duration_ms"])
             model_calls=[*state.get("model_calls",[]),record,summary_record]
         except Exception as exc:
@@ -205,7 +217,10 @@ async def agent_decide(state):
     elif action.get("action")=="finish":
         if not any(v.get("passed") for v in state.get("verification_results",[])): raise ValueError("Agent 不能在没有通过程序验证的结果时结束")
         missing=missing_tool_goals(state["user_query"],history)
-        if missing: raise ValueError(f"Agent 试图提前结束，仍缺少：{'；'.join(missing)}")
+        if missing:
+            await event(state,"agent_decide","optional_goals_unfinished","模型自主结束求解",
+                        f"模型根据已有验证证据决定结束；规则提示尚有可选目标：{'；'.join(missing)}",
+                        {"missing_goals":missing,"decision":"accept_model_finish"})
         title="决定结束任务"
     else: raise ValueError("模型返回了未知 Agent 动作")
     summary=action.get("decision_summary",title)
@@ -220,7 +235,7 @@ async def agent_decide(state):
         if hasattr(model,"synthesize"):
             try:
                 await event(state,REPORTER.key,"model_started","Report Writer 正在生成报告","正在读取全部已验证记录并组织最终回答",{"stage":"synthesize","agent":REPORTER.key})
-                answer,report_record=await report_writer.write(model,state["user_query"],history,"求解 Agent 已完成全部显式目标")
+                answer,report_record=await report_writer.write(model,model_query(state),history,"求解 Agent 已完成全部显式目标")
                 updates["model_calls"]=[*updates["model_calls"],report_record]
                 await event(state,REPORTER.key,"model_completed","Report Writer 已生成最终报告",report_record["response_summary"],report_record,report_record["duration_ms"])
             except Exception as exc:
@@ -309,7 +324,7 @@ async def verify_result(state):
     model=model_for(state)
     try:
         if not hasattr(model,"review_verification"): raise AttributeError("adapter has no verification reviewer")
-        check,record=await verification_critic.verify(model,state["user_query"],state["tool_calls"][-1],state["tolerance"],verify_call)
+        check,record=await verification_critic.verify(model,model_query(state),state["tool_calls"][-1],state["tolerance"],verify_call)
     except AttributeError:
         check=verify_call(state["tool_calls"][-1],state["tolerance"])
         check["program_passed"]=bool(check["passed"]); check["agent_approved"]=bool(check["passed"])
@@ -318,7 +333,7 @@ async def verify_result(state):
         record={"stage":"verification_review","provider":getattr(model,"provider","unknown"),"model":getattr(model,"model","unknown"),"duration_ms":0,"response_summary":review["summary"],"fallback":True}
     except Exception as exc:
         model=await model_failure(state,CRITIC.key,"verification_review",exc)
-        check,record=await verification_critic.verify(model,state["user_query"],state["tool_calls"][-1],state["tolerance"],verify_call)
+        check,record=await verification_critic.verify(model,model_query(state),state["tool_calls"][-1],state["tolerance"],verify_call)
     if "验证失败重试" in state["user_query"] and state.get("retry_count",0)==0:
         check.update({"passed":False,"program_passed":False,"agent_approved":False,"name":"intentional_demo_failure","value":max(check["value"],state["tolerance"]*100)})
         check["agent_review"]={"approved":False,"summary":"教学演示注入了当前步骤验证失败，要求修正本次方案","recommendation":"retry_step"}
@@ -376,6 +391,32 @@ async def run_task(initial:ScientificAgentState|Command,task_id:str):
     timeout=max(settings.timeout_seconds,settings.llm_timeout_seconds*(min(settings.max_tool_steps,4)+1))
     try:
         async with asyncio.timeout(timeout):
+            if isinstance(initial,dict) and initial.get("workflow_kind","pending")=="pending":
+                model=model_for(initial)
+                try:
+                    route,record=await model.route(model_query(initial))
+                except Exception as exc:
+                    model=await model_failure(initial,ANALYST.key,"intent_route",exc)
+                    route,record=await model.route(model_query(initial))
+                if not route.get("scientific"):
+                    initial.update({"workflow_kind":"general","status":"running","active_agent":"","final_answer":"",
+                      "model_calls":[*initial.get("model_calls",[]),record]})
+                    store.save(task_id,initial)
+                    await store.emit(task_id,"general_response_started",None,"正在生成回复","本轮无需进入科学计算 Agent 工作流",record,record["duration_ms"])
+                    answer=""
+                    async for chunk in model.stream_general(model_query(initial)):
+                        answer+=chunk
+                        initial["final_answer"]=answer
+                        store.save(task_id,initial)
+                        await store.emit(task_id,"general_response_delta",None,"正在生成回复","",{"delta":chunk,"answer":answer})
+                    initial.update({"status":"completed","final_answer":public_text(answer) or route.get("answer") or "你好！请告诉我你想了解什么。"})
+                    store.save(task_id,initial)
+                    await store.emit(task_id,"general_response",None,"普通对话已回复","本轮无需进入科学计算 Agent 工作流",record)
+                    await store.emit(task_id,"workflow_completed",None,"普通对话完成","未启动科学计算工具链")
+                    return
+                initial.update({"workflow_kind":"scientific","model_calls":[*initial.get("model_calls",[]),record]})
+                store.save(task_id,initial)
+                await store.emit(task_id,"science_workflow_selected",None,"进入科学计算流程","入口模型判断本轮需要科学计算 Agent 协作",record,record["duration_ms"])
             async for update in graph.astream(initial,config=config,stream_mode="values"): store.save(task_id,dict(update))
         snapshot=graph.get_state(config); state=dict(snapshot.values)
         if snapshot.interrupts: state["status"]="waiting_review"

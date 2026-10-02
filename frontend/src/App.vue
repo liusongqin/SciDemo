@@ -4,11 +4,16 @@ import MarkdownIt from 'markdown-it'
 import { katex } from '@mdit/plugin-katex'
 import DOMPurify from 'dompurify'
 import PlotlyChart from './components/PlotlyChart.vue'
+import ModelBackendSelect from './components/ModelBackendSelect.vue'
 
 type Dict = Record<string, any>
 type AgentEvent = { task_id:string; sequence:number; timestamp:string; event_type:string; node?:string; title:string; summary:string; payload:Dict; duration_ms?:number }
-type Task = { task_id:string; user_query:string; status:string; plan:Dict[]; agent_steps:Dict[]; tool_calls:Dict[]; model_calls:Dict[]; model_provider:string; verification_results:Dict[]; artifacts:Dict[]; final_answer?:string; retry_count:number; parsed_problem:Dict; active_agent?:string; agent_handoffs?:Dict[] }
+type ConversationTurn = { user:string; assistant:string; verified?:Dict[]; status?:string }
+type Task = { task_id:string; conversation_id?:string; conversation_history?:ConversationTurn[]; conversation_task_ids?:string[]; workflow_kind?:string; user_query:string; status:string; error?:string; plan:Dict[]; agent_steps:Dict[]; tool_calls:Dict[]; model_calls:Dict[]; model_provider:string; verification_results:Dict[]; artifacts:Dict[]; final_answer?:string; retry_count:number; parsed_problem:Dict; active_agent?:string; agent_handoffs?:Dict[] }
+type RunSnapshot = { task:Task; events:AgentEvent[] }
 type Example = { id:string; title:string; query:string; method:string }
+type Identity = { id:string; student_id?:string; display_name:string; kind:'guest'|'student'; login_enabled?:boolean }
+type Conversation = { conversation_id:string; task_id:string; title:string; status:string; updated:string }
 
 const md = new MarkdownIt({ html:false, linkify:true, typographer:true, breaks:true }).use(katex)
 const toolCatalog = [
@@ -29,23 +34,40 @@ const examples = ref<Example[]>([])
 const query = ref('使用 Newton 法求解 cos(x) - x = 0，初值 0.5，并显示迭代和残差')
 const task = ref<Task|null>(null)
 const events = ref<AgentEvent[]>([])
+const pastRuns = ref<RunSnapshot[]>([])
 const selected = ref<AgentEvent|null>(null)
 const modelStatus = ref<Dict|null>(null)
-const useModel = ref(true)
+const modelBackend = ref<'local'|'external'|'mock'>('local')
+const identity = ref<Identity|null>(null)
+const conversations = ref<Conversation[]>([])
+const currentConversationId = ref<string|null>(null)
+const conversationMenu = ref<string|null>(null)
+const showLogin = ref(false)
+const loginLoading = ref(false)
+const loginError = ref('')
+const studentId = ref('')
+const password = ref('')
+const captcha = ref('')
+const prelogin = ref<{prelogin_id:string;captcha_required:boolean;captcha_image?:string}|null>(null)
 const teaching = ref(false)
 const tolerance = ref(1e-8)
 const retries = ref(2)
 const busy = ref(false)
+const submitting = ref(false)
+const creatingConversation = ref(false)
 const showSettings = ref(false)
 const showInspector = ref(false)
 const composer = ref<HTMLTextAreaElement|null>(null)
+const chatScroll = ref<HTMLElement|null>(null)
 let source: EventSource|null = null
 let poller: number|undefined
 
 const taskDone = computed(() => ['completed','failed','rejected','cancelled'].includes(task.value?.status || ''))
 const taskCompleted = computed(() => task.value?.status==='completed')
 const taskCancelled = computed(() => task.value?.status==='cancelled')
+const taskFailed = computed(() => ['failed','rejected'].includes(task.value?.status || ''))
 const modelOnline = computed(() => Boolean(modelStatus.value?.available))
+const authEnabled = computed(() => Boolean(identity.value?.login_enabled))
 const latestVerification = computed(() => task.value?.verification_results?.at(-1))
 const answerHtml = computed(() => DOMPurify.sanitize(md.render(friendlyText(task.value?.final_answer || ''))))
 const elapsed = computed(() => {
@@ -58,10 +80,13 @@ const toolCount = computed(() => task.value?.tool_calls?.length || events.value.
 const currentTitle = computed(() => task.value ? short(task.value.user_query, 29) : '新的科学计算')
 const selectedPayload = computed(() => JSON.stringify(selected.value?.payload || {}, null, 2))
 const processEvents = computed(() => {
-  const visible=events.value.filter(e => ['agent_handoff','model_started','model_completed','model_failed','agent_decision','tool_started','tool_completed','tool_failed','verification_completed','artifact_created','retry_started','human_review_required','human_feedback_received'].includes(e.event_type))
+  return visibleProcessEvents(events.value)
+})
+function visibleProcessEvents(items:AgentEvent[]){
+  const visible=items.filter(e => ['agent_handoff','model_started','model_completed','model_failed','agent_decision','tool_started','tool_completed','tool_failed','verification_completed','artifact_created','retry_started','human_review_required','human_feedback_received'].includes(e.event_type))
   return visible.filter((event,index) => event.event_type!=='model_started' || !visible.slice(index+1).some(later =>
     later.node===event.node && ['model_completed','model_failed'].includes(later.event_type) && later.payload?.stage===event.payload?.stage))
-})
+}
 const showRunningPlaceholder = computed(() => {
   const latest=events.value.at(-1)
   return busy.value && (!latest || !processEvents.value.some(event=>event.sequence===latest.sequence))
@@ -81,13 +106,14 @@ const currentActivity = computed(() => [...events.value].reverse().find(e => !['
 const agentCards = computed(() => agentDefinitions.map(agent => {
   const handoffs=task.value?.agent_handoffs || []
   const participated=handoffs.some(item=>item.from===agent.key || item.to===agent.key)
-  const active=Boolean(task.value) && busy.value && effectiveActiveAgent.value===agent.key
+  const active=Boolean(task.value) && busy.value && !submitting.value && effectiveActiveAgent.value===agent.key
   const cancelled=taskCancelled.value && effectiveActiveAgent.value===agent.key
+  const failed=taskFailed.value && effectiveActiveAgent.value===agent.key
   const completed=taskCompleted.value ? participated || agent.key==='report_writer' : handoffs.some(item=>item.from===agent.key)
-  return {...agent,state:active?'active':cancelled?'cancelled':completed?'completed':participated?'ready':'waiting',status:active?'工作中':cancelled?'已取消':completed?'已完成':participated?'已就绪':'等待中'}
+  return {...agent,state:active?'active':cancelled?'cancelled':failed?'failed':completed?'completed':participated?'ready':'waiting',status:active?'工作中':cancelled?'已取消':failed?'异常':completed?'已完成':participated?'已就绪':'等待中'}
 }))
 function agentState(key:string){ return agentCards.value.find(agent=>agent.key===key)?.state || 'waiting' }
-function routeActive(from:string,to:string){ return busy.value && latestHandoff.value?.from===from && latestHandoff.value?.to===to }
+function routeActive(from:string,to:string){ return busy.value && !submitting.value && latestHandoff.value?.from===from && latestHandoff.value?.to===to }
 
 function short(value:string, length=48){ return value.length > length ? value.slice(0,length)+'…' : value }
 function friendlyText(value:string){
@@ -135,13 +161,37 @@ function selectEvent(item:AgentEvent){ selected.value=item; showInspector.value=
 function resizeComposer(){ if(!composer.value)return; composer.value.style.height='auto'; composer.value.style.height=Math.min(160,Math.max(54,composer.value.scrollHeight))+'px' }
 
 async function api<T>(url:string, init?:RequestInit):Promise<T>{
-  const response=await fetch(url,init)
-  if(!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`)
-  return response.json()
+  const response=await fetch(url,{...init,credentials:'include'})
+  if(!response.ok){ const error=new Error((await response.text()) || `HTTP ${response.status}`) as Error & {status?:number}; error.status=response.status; throw error }
+  return response.status===204 ? undefined as T : response.json()
 }
+async function loadConversations(){ conversations.value=await api<Conversation[]>('/api/conversations') }
+async function openSettings(){ showSettings.value=true; try{ modelStatus.value=await api<Dict>('/api/model/status') }catch{} }
+async function refreshPrelogin(){
+  loginLoading.value=true; loginError.value=''
+  try{ prelogin.value=await api('/api/auth/prelogin',{method:'POST'}); captcha.value='' }
+  catch(error){ loginError.value=String(error) }
+  finally{ loginLoading.value=false }
+}
+async function login(){ showLogin.value=true; await refreshPrelogin() }
+async function submitLogin(){
+  if(!prelogin.value)return
+  loginLoading.value=true; loginError.value=''
+  try{
+    identity.value=await api<Identity>('/api/auth/direct-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prelogin_id:prelogin.value.prelogin_id,student_id:studentId.value,password:password.value,captcha:captcha.value})})
+    password.value=''; captcha.value=''; showLogin.value=false; await newChat()
+  }catch(error){ const message=String(error); await refreshPrelogin(); loginError.value=message }
+  finally{ loginLoading.value=false }
+}
+async function logout(){ identity.value=await api<Identity>('/api/auth/logout',{method:'POST'}); newChat(); await loadConversations() }
 async function refresh(id:string){
   const data=await api<{task:Task;events:AgentEvent[]}>(`/api/tasks/${id}`)
-  task.value=data.task; events.value=data.events
+  task.value=data.task; events.value=data.events; currentConversationId.value=data.task.conversation_id || null
+  const ids=data.task.conversation_task_ids || []
+  if(ids.join('|')!==pastRuns.value.map(run=>run.task.task_id).join('|')){
+    const loaded=await Promise.all(ids.map(taskId=>api<RunSnapshot>(`/api/tasks/${taskId}`)))
+    pastRuns.value=loaded
+  }
   busy.value=!['completed','failed','waiting_review','rejected','cancelled'].includes(data.task.status)
 }
 function listen(id:string){
@@ -151,7 +201,12 @@ function listen(id:string){
   source.onmessage=async event=>{
     const item=JSON.parse(event.data) as AgentEvent
     if(!events.value.some(e=>e.sequence===item.sequence)) events.value.push(item)
-    await refresh(id)
+    if(item.event_type==='general_response_delta' && task.value){
+      task.value={...task.value,workflow_kind:'general',status:'running',final_answer:String(item.payload?.answer || '')}
+      busy.value=true
+      await nextTick()
+      chatScroll.value?.scrollTo({top:chatScroll.value.scrollHeight})
+    }else await refresh(id)
     if(['workflow_completed','workflow_failed','workflow_cancelled'].includes(item.event_type)) source?.close()
   }
   source.onerror=()=>{ if(!taskDone.value) window.setTimeout(()=>listen(id),1800) }
@@ -160,20 +215,44 @@ async function restore(id:string){
   try { await refresh(id); if(!taskDone.value) listen(id) }
   catch { localStorage.removeItem('scidemo-task') }
 }
+async function selectConversation(item:Conversation){
+  if(item.task_id){ await restore(item.task_id); localStorage.setItem('scidemo-task',item.task_id); return }
+  source?.close(); task.value=null; events.value=[]; pastRuns.value=[]; busy.value=false; currentConversationId.value=item.conversation_id
+}
+async function renameConversation(item:Conversation){
+  conversationMenu.value=null
+  const title=window.prompt('修改会话标题',item.title)?.trim()
+  if(!title || title===item.title)return
+  await api(`/api/conversations/${item.conversation_id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})}); await loadConversations()
+}
+async function deleteConversation(item:Conversation){
+  conversationMenu.value=null
+  if(!window.confirm(`删除“${item.title}”？该会话的聊天与执行记录将一并删除。`))return
+  await api(`/api/conversations/${item.conversation_id}`,{method:'DELETE'})
+  if(currentConversationId.value===item.conversation_id) await newChat(); else await loadConversations()
+}
 async function run(){
-  if(query.value.trim().length<3 || busy.value)return
+  if(query.value.trim().length<1 || busy.value || submitting.value)return
   const submitted=query.value.trim()
-  busy.value=true; task.value=null; events.value=[]; selected.value=null
+  const parentTaskId=task.value?.task_id
+  submitting.value=true; selected.value=null
   try{
-    const data=await api<{task_id:string}>('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:submitted,teaching_mode:teaching.value,require_review:teaching.value,use_local_model:useModel.value,tolerance:tolerance.value,max_retries:retries.value})})
+    const data=await api<{task_id:string}>('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:submitted,parent_task_id:parentTaskId,conversation_id:currentConversationId.value,teaching_mode:teaching.value,require_review:teaching.value,model_backend:modelBackend.value,tolerance:tolerance.value,max_retries:retries.value})})
     localStorage.setItem('scidemo-task',data.task_id)
     query.value=''; await nextTick(); resizeComposer()
-    await refresh(data.task_id); listen(data.task_id)
+    busy.value=true; await refresh(data.task_id); listen(data.task_id); await loadConversations()
   }catch(error){
     busy.value=false
+    if((error as Error & {status?:number}).status===403){
+      await newChat()
+      query.value=submitted
+      selected.value={task_id:'',sequence:0,timestamp:new Date().toISOString(),event_type:'failed',title:'已切换到新的安全会话',summary:'原会话属于登录前的游客身份，已为当前账号创建新会话。请再次发送。',payload:{}}
+      showInspector.value=true
+      return
+    }
     selected.value={task_id:'',sequence:0,timestamp:new Date().toISOString(),event_type:'failed',title:'无法创建任务',summary:String(error),payload:{}}
     showInspector.value=true
-  }
+  }finally{ submitting.value=false }
 }
 async function review(action:'approve'|'modify'|'reject'){
   if(!task.value)return
@@ -186,14 +265,25 @@ async function cancelGeneration(){
   await api(`/api/tasks/${task.value.task_id}/cancel`,{method:'POST'})
   source?.close(); await refresh(task.value.task_id)
 }
-function newChat(){ source?.close(); task.value=null; events.value=[]; selected.value=null; busy.value=false; localStorage.removeItem('scidemo-task'); nextTick(()=>composer.value?.focus()) }
+async function newChat(){
+  if(creatingConversation.value)return
+  const current=conversations.value.find(item=>item.conversation_id===currentConversationId.value)
+  if(!task.value && current && !current.task_id){ nextTick(()=>composer.value?.focus()); return }
+  creatingConversation.value=true
+  source?.close(); task.value=null; events.value=[]; pastRuns.value=[]; selected.value=null; busy.value=false; submitting.value=false; localStorage.removeItem('scidemo-task')
+  try{ const created=await api<Conversation>('/api/conversations',{method:'POST'}); currentConversationId.value=created.conversation_id; await loadConversations() }catch{ currentConversationId.value=null }
+  finally{ creatingConversation.value=false }
+  nextTick(()=>composer.value?.focus())
+}
 function onComposerKey(e:KeyboardEvent){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); run() } }
 
 watch(query, ()=>nextTick(resizeComposer))
 onMounted(async()=>{
-  const results=await Promise.allSettled([api<Example[]>('/api/examples'),api<Dict>('/api/model/status')])
+  const results=await Promise.allSettled([api<Example[]>('/api/examples'),api<Dict>('/api/model/status'),api<Identity>('/api/auth/me')])
   if(results[0].status==='fulfilled') examples.value=results[0].value
   if(results[1].status==='fulfilled') modelStatus.value=results[1].value
+  if(results[2].status==='fulfilled') identity.value=results[2].value
+  await loadConversations().catch(()=>{})
   const id=localStorage.getItem('scidemo-task'); if(id) await restore(id)
   poller=window.setInterval(()=>task.value && !taskDone.value && refresh(task.value.task_id),2200)
   resizeComposer()
@@ -207,20 +297,22 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
       <div class="brand"><div class="brand-mark"><i></i><i></i><i></i></div><span>SciAgent</span><em>LAB</em></div>
       <div class="top-center"><span class="crumb">工作区</span><span class="slash">/</span><strong>{{ currentTitle }}</strong></div>
       <div class="top-actions">
-        <div class="model-state" :class="{offline:!modelOnline}"><span></span>{{ modelOnline ? (modelStatus?.configured_model || modelStatus?.model || 'Qwen3.5-9B') : '模型离线' }}</div>
-        <button class="icon-btn" aria-label="设置" @click="showSettings=!showSettings">⌘</button>
-        <button class="new-button" @click="newChat"><span>＋</span> 新会话</button>
+        <button class="identity-button" :class="{guest:identity?.kind!=='student'}" :disabled="identity?.kind!=='student' && !authEnabled" @click="identity?.kind==='student' ? logout() : login()">{{ identity?.kind==='student' ? `${identity.display_name} · 退出` : authEnabled ? '游客 · 北航登录' : '游客访问' }}</button>
       </div>
     </header>
 
     <main class="workspace">
       <aside class="history-pane">
-        <div class="pane-head"><span>会话</span><button aria-label="新会话" @click="newChat">＋</button></div>
+        <div class="pane-head"><span>会话</span><button class="new-button sidebar-new" :disabled="creatingConversation" @click="newChat"><span>＋</span>{{ creatingConversation ? '创建中' : '新会话' }}</button></div>
         <div class="history-scroll">
-          <div class="history-label">当前</div>
-          <button class="history-item active">
-            <span class="history-icon">∿</span><span><b>{{ currentTitle }}</b><small>{{ task ? `${events.length} 条执行事件` : '等待输入问题' }}</small></span><i>•••</i>
-          </button>
+          <div class="history-label">全部会话</div>
+          <div v-for="item in conversations" :key="item.conversation_id" class="history-row">
+            <button class="history-item" :class="{active:item.conversation_id===currentConversationId}" @click="selectConversation(item)"><span class="history-icon">◷</span><span><b>{{ item.title }}</b><small>{{ item.status==='empty'?'空白会话':item.status }}</small></span></button>
+            <button class="history-more" aria-label="会话菜单" @click.stop="conversationMenu=conversationMenu===item.conversation_id?null:item.conversation_id">•••</button>
+            <div v-if="conversationMenu===item.conversation_id" class="history-menu"><button @click="renameConversation(item)">重命名</button><button class="danger" @click="deleteConversation(item)">删除会话</button></div>
+          </div>
+        </div>
+        <div class="sidebar-resources">
           <details class="sidebar-fold">
             <summary><span>快速开始</span><em>{{ examples.length }}</em></summary>
             <button v-for="item in examples" :key="item.id" class="history-item" @click="query=item.query;nextTick(()=>composer?.focus())">
@@ -232,15 +324,15 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
             <div v-for="tool in toolCatalog" :key="tool.name" class="tool-catalog-item"><b>{{ tool.label }}</b><code>{{ tool.name }}</code><p>{{ tool.description }}</p></div>
           </details>
         </div>
-        <div class="runtime-card">
+        <button class="runtime-card" @click="openSettings">
           <div><span class="pulse-dot" :class="{off:!modelOnline}"></span><b>本地运行时</b><em>{{ modelOnline?'READY':'OFFLINE' }}</em></div>
-          <p>Qwen3.5-9B · 2 × RTX 3090</p>
+          <p>{{ modelStatus?.configured_model || modelStatus?.model || 'Qwen3.5-9B' }} · 运行与模型设置</p>
           <div class="usage"><span style="width:62%"></span></div>
-        </div>
+        </button>
       </aside>
 
       <section class="chat-pane">
-        <div class="chat-scroll">
+        <div ref="chatScroll" class="chat-scroll">
           <div v-if="!task" class="welcome">
             <div class="orb"><span>∑</span></div>
             <p class="eyebrow">SCIENTIFIC COMPUTING AGENT</p>
@@ -249,6 +341,15 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
           </div>
 
           <template v-else>
+            <template v-for="run in pastRuns" :key="run.task.task_id">
+              <div class="message user-message previous-turn"><div class="avatar user-avatar">你</div><div><div class="message-meta"><b>你</b><span>上一轮</span></div><article class="user-bubble" v-html="renderMarkdown(run.task.user_query)"></article></div></div>
+              <div class="message agent-message previous-turn"><div class="avatar agent-avatar">∑</div><div class="message-body"><div class="message-meta"><b>SciAgent</b><span>历史执行</span></div>
+                <div v-if="visibleProcessEvents(run.events).length" class="process-wrap historical-process"><div class="process-heading"><div><span>AGENT PROCESS</span><b>运行过程</b></div><em>{{ run.task.tool_calls?.length || 0 }} 次工具调用</em></div><div class="process-thread">
+                  <section v-for="event in visibleProcessEvents(run.events)" :key="event.sequence" class="process-block" :class="processKind(event)"><button class="process-marker" @click="selectEvent(event)">{{ eventIcon(event.event_type) }}</button><div class="process-content"><div class="process-meta"><span>{{ processLabel(event) }}</span><time>{{ displayTime(event.timestamp) }}</time></div><h3>{{ friendlyText(event.title) }}</h3><div class="process-markdown" v-html="renderMarkdown(event.summary)"></div><details v-if="event.event_type==='artifact_created'" class="artifact-details"><summary>查看生成的图表</summary><PlotlyChart :artifact="event.payload" /></details><details v-if="Object.keys(event.payload || {}).length"><summary>查看结构化证据</summary><pre>{{ processPayload(event) }}</pre></details></div></section>
+                </div></div>
+                <section v-if="run.task.final_answer" class="final-response compact-response"><article class="markdown-body" v-html="renderMarkdown(run.task.final_answer)"></article><section v-if="run.task.artifacts?.length" class="final-artifacts"><PlotlyChart v-for="(artifact,index) in run.task.artifacts" :key="`${run.task.task_id}-${index}`" :artifact="artifact" /></section></section>
+              </div></div>
+            </template>
             <div class="message user-message"><div class="avatar user-avatar">你</div><div><div class="message-meta"><b>你</b><span>刚刚</span></div><article class="user-bubble" v-html="renderMarkdown(task.user_query)"></article></div></div>
             <div class="message agent-message">
               <div class="avatar agent-avatar">∑</div>
@@ -300,11 +401,12 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
         </div>
 
         <div class="composer-wrap">
-          <div class="composer" :class="{busy}">
+          <div class="composer" :class="{busy:busy || submitting}">
+            <div class="composer-options"><span>运行方式</span><div><button :class="{on:teaching}" @click="teaching=!teaching">◇ 人工审核</button><ModelBackendSelect v-model="modelBackend" :external-configured="Boolean(modelStatus?.external?.configured)" compact /></div></div>
             <textarea ref="composer" v-model="query" rows="1" placeholder="输入一个科学计算问题…" @keydown="onComposerKey" @input="resizeComposer"></textarea>
             <div class="composer-bar">
-              <div><button :class="{on:teaching}" @click="teaching=!teaching">◇ 人工审核</button><button :class="{on:useModel}" @click="useModel=!useModel">✦ 本地 Qwen</button></div>
-              <div><span>{{ query.length }}/2000</span><button v-if="busy" class="cancel-generation" aria-label="停止模型生成" @click="cancelGeneration">■ 停止生成</button><button v-else class="send" :disabled="query.trim().length<3" @click="run">↑</button></div>
+              <div></div>
+              <div><span>{{ query.length }}/2000</span><button v-if="busy && !submitting" class="cancel-generation" aria-label="停止模型生成" @click="cancelGeneration">■ 停止生成</button><button v-else class="send" :disabled="query.trim().length<1 || submitting" @click="run">{{ submitting ? '…' : '↑' }}</button></div>
             </div>
           </div>
           <p>Enter 发送 · Shift + Enter 换行 · 结果由程序验证，仍需结合问题条件判断</p>
@@ -312,7 +414,8 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
       </section>
 
       <aside class="graph-pane">
-        <div class="graph-head"><div><span>MULTI-AGENT ROUTING</span><h2>Agent 协作流转</h2></div><div><span class="live-dot" :class="{settled:!busy,cancelled:taskCancelled}"></span>{{ busy?'流转中':taskCancelled?'已取消':task?'已同步':'待命' }}</div></div>
+        <template v-if="task?.workflow_kind==='scientific'">
+        <div class="graph-head"><div><span>MULTI-AGENT ROUTING</span><h2>Agent 协作流转</h2></div><div><span class="live-dot" :class="{settled:!busy,cancelled:taskCancelled,failed:taskFailed}"></span>{{ busy?'流转中':taskCancelled?'已取消':taskFailed?'异常':task?'已同步':'待命' }}</div></div>
         <div class="agent-flow">
           <svg viewBox="0 0 420 405" role="img" aria-label="四个大模型 Agent 的协作流转关系">
             <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z"/></marker></defs>
@@ -325,20 +428,22 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
             <g class="flow-agent" :class="agentState('verification_critic')" transform="translate(232 139)"><circle cx="60" cy="35" r="31"/><text class="flow-icon" x="60" y="40">◇</text><text class="flow-name" x="60" y="84">验证审查 Agent</text><text class="flow-role" x="60" y="100">模型审阅 · 程序取证</text></g>
             <g class="flow-agent" :class="agentState('report_writer')" transform="translate(150 282)"><circle cx="60" cy="35" r="31"/><text class="flow-icon" x="60" y="40">✦</text><text class="flow-name" x="60" y="84">报告生成 Agent</text><text class="flow-role" x="60" y="100">汇总证据 · 独立成文</text></g>
           </svg>
-          <div class="flow-caption"><span class="flow-pulse" :class="{active:busy,done:taskCompleted,cancelled:taskCancelled}"></span><b>{{ effectiveActiveAgent ? agentName(effectiveActiveAgent) : 'Agent 协作网络' }}</b><em>{{ taskCancelled ? '用户已停止生成，协作流程在当前节点取消' : taskCompleted ? 'Agent 协作已结束，结果与验证证据已归档' : (latestHandoff?.reason || currentActivity?.summary || '等待任务进入协作网络') }}</em></div>
+          <div class="flow-caption"><span class="flow-pulse" :class="{active:busy,done:taskCompleted,cancelled:taskCancelled,failed:taskFailed}"></span><b>{{ effectiveActiveAgent ? agentName(effectiveActiveAgent) : 'Agent 协作网络' }}</b><em>{{ taskCancelled ? '用户已停止生成，协作流程在当前节点取消' : taskFailed ? (task?.error || currentActivity?.summary || 'Agent 工作流异常终止') : taskCompleted ? 'Agent 协作已结束，结果与验证证据已归档' : (latestHandoff?.reason || currentActivity?.summary || '等待任务进入协作网络') }}</em></div>
         </div>
 
         <div class="team-section">
           <div class="team-title"><div><span>COLLABORATION STATUS</span><b>当前协作</b></div><em>{{ task ? `${task.agent_handoffs?.length || 0} 次交接` : '等待任务' }}</em></div>
           <section v-if="task" class="mission-card">
             <div class="mission-label"><span>当前协作</span><em v-if="busy">LIVE</em></div>
-            <h3>{{ currentActivity?.title || (taskDone ? '协作任务已完成' : '正在建立任务上下文') }}</h3>
-            <p>{{ currentActivity?.summary || '各 Agent 将按职责接力完成任务。' }}</p>
+            <h3>{{ taskFailed ? 'Agent 工作流异常' : (currentActivity?.title || (taskDone ? '协作任务已完成' : '正在建立任务上下文')) }}</h3>
+            <p>{{ taskFailed ? (task.error || currentActivity?.summary) : (currentActivity?.summary || '各 Agent 将按职责接力完成任务。') }}</p>
             <div v-if="latestHandoff" class="handoff-route"><span>{{ agentName(latestHandoff?.from) }}</span><i>→</i><span>{{ agentName(latestHandoff?.to) }}</span></div>
           </section>
           <div v-else class="team-empty"><span>◎</span><p>提交问题后，四位 Agent 会在这里接力协作。</p></div>
           <div v-if="task" class="team-metrics"><div><b>{{ task.tool_calls?.length || 0 }}</b><span>计算动作</span></div><div><b>{{ task.verification_results?.filter(v=>v.passed).length || 0 }}</b><span>验证通过</span></div><div><b>{{ task.retry_count || 0 }}</b><span>修正次数</span></div></div>
         </div>
+        </template>
+        <div v-else class="graph-idle"><span>◎</span><h2>{{ task?.workflow_kind==='general' ? '普通对话' : '等待意图识别' }}</h2><p>{{ task?.workflow_kind==='general' ? '本轮无需启动科学计算 Agent 协作流。' : task ? '入口模型正在判断是否需要科学计算。' : '提出科学计算问题后，这里将展示 Agent 协作流转。' }}</p></div>
       </aside>
     </main>
 
@@ -346,11 +451,9 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
       <aside class="inspector"><header><div><span>EVENT {{ selected?.sequence }}</span><h2>{{ friendlyText(selected?.title || '') }}</h2></div><button @click="showInspector=false">×</button></header><p>{{ friendlyText(selected?.summary || '') }}</p><div class="inspector-meta"><span>{{ selected?.node || 'system' }}</span><span>{{ selected?.event_type }}</span><span v-if="selected?.duration_ms">{{ selected.duration_ms.toFixed(1) }} ms</span></div><h3>结构化载荷</h3><pre>{{ selectedPayload }}</pre></aside>
     </div>
 
-    <div v-if="showSettings" class="popover settings-popover">
-      <div class="popover-head"><b>运行设置</b><button @click="showSettings=false">×</button></div>
-      <label><span>验证容差</span><input v-model.number="tolerance" type="number" step="1e-8" min="1e-14" max="0.1"></label>
-      <label><span>最大重试次数</span><input v-model.number="retries" type="number" min="0" max="5"></label>
-      <label class="toggle"><span>使用本地 Qwen</span><input v-model="useModel" type="checkbox"></label>
-    </div>
+    <div v-if="showSettings" class="settings-backdrop" @click.self="showSettings=false"><section class="settings-dialog"><header><div><span>SYSTEM CONTROL</span><h2>运行与模型设置</h2></div><button @click="showSettings=false">×</button></header><div class="settings-grid"><section><h3>运行设置</h3><label><span>验证容差</span><input v-model.number="tolerance" type="number" step="1e-8" min="1e-14" max="0.1"></label><label><span>最大重试次数</span><input v-model.number="retries" type="number" min="0" max="5"></label><label><span>模型来源</span><ModelBackendSelect v-model="modelBackend" :external-configured="Boolean(modelStatus?.external?.configured)" /></label><p class="setting-help">离线演示不调用真实大模型，使用确定性规则模拟 Agent 决策，适合界面演示和自动测试。</p></section><section><h3>本地模型监控</h3><div class="monitor-card"><div><span class="pulse-dot" :class="{off:!modelOnline}"></span><b>{{ modelOnline?'服务正常':'服务离线' }}</b><em>{{ modelStatus?.provider || 'local-vllm' }}</em></div><p>模型：{{ modelStatus?.configured_model || modelStatus?.model || 'Qwen3.5-9B' }}</p><p>可用模型：{{ modelStatus?.models?.join('、') || '未获取' }}</p><code v-if="modelStatus?.error">{{ modelStatus.error }}</code></div></section></div><div class="api-config"><span>外部模型 API</span><b>{{ modelStatus?.external?.configured ? modelStatus.external.model : '尚未配置' }}</b><code>{{ modelStatus?.external?.base_url || 'EXTERNAL_LLM_BASE_URL' }}</code></div></section></div>
+
+    <div v-if="showLogin" class="login-backdrop" @click.self="showLogin=false"><form class="login-card" @submit.prevent="submitLogin"><header><div><span>BUAA IDENTITY</span><h2>北航统一身份认证</h2></div><button type="button" @click="showLogin=false">×</button></header><p>采用 UBAA 同类的服务端认证中转。密码只用于本次向北航统一认证提交，不会保存。</p><label><span>学号</span><input v-model="studentId" autocomplete="username" required></label><label><span>密码</span><input v-model="password" type="password" autocomplete="current-password" required></label><label v-if="prelogin?.captcha_required"><span>验证码</span><div class="captcha-row"><input v-model="captcha" required><button type="button" @click="refreshPrelogin"><img v-if="prelogin.captcha_image" :src="prelogin.captcha_image" alt="北航统一认证验证码"><span v-else>刷新</span></button></div></label><div v-if="loginError" class="login-error">{{ loginError }}</div><button class="login-submit" type="submit" :disabled="loginLoading || !prelogin">{{ loginLoading ? '正在验证…' : '登录' }}</button></form></div>
+
   </div>
 </template>
