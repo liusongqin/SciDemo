@@ -22,13 +22,25 @@ class Store:
             CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL,
               created TEXT NOT NULL, updated TEXT NOT NULL);
             """)
+            owners=dict(db.execute("SELECT id,owner_id FROM conversations").fetchall())
+            for task_id,body in db.execute("SELECT id,state FROM tasks").fetchall():
+                state=json.loads(body); conversation_id=state.get("conversation_id")
+                if not state.get("owner_id") and owners.get(conversation_id):
+                    state["owner_id"]=owners[conversation_id]
+                    db.execute("UPDATE tasks SET state=? WHERE id=?",(json.dumps(state,ensure_ascii=False,default=str),task_id))
 
     def _connect(self):
         return sqlite3.connect(self.path)
 
     def save(self, task_id: str, state: dict[str, Any]):
-        body = json.dumps(state, ensure_ascii=False, default=str)
+        persisted=dict(state)
         with self._connect() as db:
+            row=db.execute("SELECT state FROM tasks WHERE id=?",(task_id,)).fetchone()
+            if row:
+                previous=json.loads(row[0])
+                for key in ("task_id","conversation_id","owner_id"):
+                    if previous.get(key): persisted[key]=previous[key]
+            body=json.dumps(persisted,ensure_ascii=False,default=str)
             db.execute("INSERT INTO tasks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated=excluded.updated",
                        (task_id, body, datetime.now(timezone.utc).isoformat()))
 
@@ -86,6 +98,16 @@ class Store:
             result=db.execute("UPDATE conversations SET title=?,updated=? WHERE id=? AND owner_id=?",
                               (title.strip(),datetime.now(timezone.utc).isoformat(),conversation_id,owner_id))
         return result.rowcount>0
+
+    def conversation_tasks(self,conversation_id: str,owner_id: str) -> list[dict[str,Any]]:
+        with self._connect() as db: rows=db.execute("SELECT state FROM tasks ORDER BY updated").fetchall()
+        return [state for (body,) in rows
+                if (state:=json.loads(body)).get("conversation_id")==conversation_id
+                and state.get("owner_id")==owner_id]
+
+    def latest_conversation_task(self,conversation_id: str,owner_id: str) -> dict[str,Any]|None:
+        tasks=self.conversation_tasks(conversation_id,owner_id)
+        return tasks[-1] if tasks else None
 
     def delete_conversation(self,conversation_id: str,owner_id: str) -> bool:
         if self.conversation_owner(conversation_id)!=owner_id: return False

@@ -56,6 +56,30 @@ async def test_guest_can_rename_and_delete_own_conversation():
     assert not any(item["conversation_id"]==conversation_id for item in conversations)
 
 @pytest.mark.asyncio
+async def test_running_conversation_must_be_stopped_before_deletion():
+    async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test") as client:
+        identity=(await client.get("/api/auth/me")).json()
+        created=(await client.post("/api/conversations")).json(); conversation_id=created["conversation_id"]
+        state=initial("仍在运行的任务")
+        state.update({"conversation_id":conversation_id,"owner_id":identity["id"],"status":"running"})
+        store.save(state["task_id"],state)
+        # Workflow state reducers must not be able to drop immutable ownership metadata.
+        reduced={key:value for key,value in state.items() if key!="owner_id"}
+        reduced["status"]="running"; store.save(state["task_id"],reduced)
+        assert store.get(state["task_id"])["owner_id"]==identity["id"]
+        restored=await client.get(f"/api/conversations/{conversation_id}")
+        assert restored.status_code==200
+        assert restored.json()["task"]["task_id"]==state["task_id"]
+        assert restored.json()["task"]["status"]=="running"
+        rejected=await client.delete(f"/api/conversations/{conversation_id}")
+        assert rejected.status_code==409
+        assert store.conversation_owner(conversation_id)==identity["id"]
+        state["status"]="cancelled"; store.save(state["task_id"],state)
+        deleted=await client.delete(f"/api/conversations/{conversation_id}")
+    assert deleted.status_code==204
+    assert store.conversation_owner(conversation_id) is None
+
+@pytest.mark.asyncio
 async def test_cas_login_uses_browser_origin_for_service_callback(monkeypatch):
     monkeypatch.setattr(settings, "buaa_direct_auth", True)
     async with AsyncClient(transport=ASGITransport(app=app),base_url="http://test",follow_redirects=False) as client:

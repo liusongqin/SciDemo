@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 class ScientificAgentState(TypedDict, total=False):
     task_id: str
+    owner_id: str
     conversation_id: str
     conversation_history: list[dict[str, Any]]
     conversation_summary: str

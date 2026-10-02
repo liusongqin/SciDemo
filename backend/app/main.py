@@ -147,6 +147,13 @@ async def conversations(request: Request): return store.list_conversations(requi
 @app.post("/api/conversations",status_code=201)
 async def create_conversation(request: Request): return store.create_conversation(require_identity(request)["id"])
 
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str,request: Request):
+    owner_id=require_identity(request)["id"]
+    if store.conversation_owner(conversation_id)!=owner_id: raise HTTPException(404,"会话不存在")
+    state=store.latest_conversation_task(conversation_id,owner_id)
+    return {"conversation_id":conversation_id,"task":state,"events":store.events(state["task_id"]) if state else []}
+
 @app.patch("/api/conversations/{conversation_id}")
 async def rename_conversation(conversation_id: str,body: ConversationRename,request: Request):
     if not store.rename_conversation(conversation_id,require_identity(request)["id"],body.title): raise HTTPException(404,"会话不存在")
@@ -154,7 +161,15 @@ async def rename_conversation(conversation_id: str,body: ConversationRename,requ
 
 @app.delete("/api/conversations/{conversation_id}",status_code=204)
 async def delete_conversation(conversation_id: str,request: Request):
-    if not store.delete_conversation(conversation_id,require_identity(request)["id"]): raise HTTPException(404,"会话不存在")
+    owner_id=require_identity(request)["id"]
+    if store.conversation_owner(conversation_id)!=owner_id: raise HTTPException(404,"会话不存在")
+    tasks=store.conversation_tasks(conversation_id,owner_id)
+    terminal={"completed","failed","rejected","cancelled"}
+    if any(state.get("status") not in terminal for state in tasks):
+        raise HTTPException(409,"会话仍有任务正在运行或等待审核，请先停止任务再删除")
+    if any((job:=running_tasks.get(state["task_id"])) and not job.done() for state in tasks):
+        raise HTTPException(409,"会话任务正在结束，请稍后再删除")
+    if not store.delete_conversation(conversation_id,owner_id): raise HTTPException(404,"会话不存在")
     return Response(status_code=204)
 
 @app.get("/api/examples")

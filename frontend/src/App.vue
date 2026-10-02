@@ -11,6 +11,7 @@ type AgentEvent = { task_id:string; sequence:number; timestamp:string; event_typ
 type ConversationTurn = { user:string; assistant:string; verified?:Dict[]; status?:string }
 type Task = { task_id:string; conversation_id?:string; conversation_history?:ConversationTurn[]; conversation_task_ids?:string[]; workflow_kind?:string; user_query:string; status:string; error?:string; plan:Dict[]; agent_steps:Dict[]; tool_calls:Dict[]; model_calls:Dict[]; model_provider:string; verification_results:Dict[]; artifacts:Dict[]; final_answer?:string; retry_count:number; parsed_problem:Dict; active_agent?:string; agent_handoffs?:Dict[] }
 type RunSnapshot = { task:Task; events:AgentEvent[] }
+type ConversationSnapshot = { conversation_id:string; task:Task|null; events:AgentEvent[] }
 type Example = { id:string; title:string; query:string; method:string }
 type Identity = { id:string; student_id?:string; display_name:string; kind:'guest'|'student'; login_enabled?:boolean }
 type Conversation = { conversation_id:string; task_id:string; title:string; status:string; updated:string }
@@ -42,6 +43,8 @@ const identity = ref<Identity|null>(null)
 const conversations = ref<Conversation[]>([])
 const currentConversationId = ref<string|null>(null)
 const conversationMenu = ref<string|null>(null)
+const deletingConversationId = ref<string|null>(null)
+const loadingConversationId = ref<string|null>(null)
 const showLogin = ref(false)
 const loginLoading = ref(false)
 const loginError = ref('')
@@ -54,13 +57,17 @@ const tolerance = ref(1e-8)
 const retries = ref(2)
 const busy = ref(false)
 const submitting = ref(false)
-const creatingConversation = ref(false)
 const showSettings = ref(false)
 const showInspector = ref(false)
 const composer = ref<HTMLTextAreaElement|null>(null)
 const chatScroll = ref<HTMLElement|null>(null)
 let source: EventSource|null = null
 let poller: number|undefined
+let conversationPoller: number|undefined
+let conversationLoadGeneration = 0
+// Incremented whenever the user changes conversations. Async work from an old
+// view must never be allowed to overwrite the newly selected conversation.
+let viewGeneration = 0
 
 const taskDone = computed(() => ['completed','failed','rejected','cancelled'].includes(task.value?.status || ''))
 const taskCompleted = computed(() => task.value?.status==='completed')
@@ -116,6 +123,7 @@ function agentState(key:string){ return agentCards.value.find(agent=>agent.key==
 function routeActive(from:string,to:string){ return busy.value && !submitting.value && latestHandoff.value?.from===from && latestHandoff.value?.to===to }
 
 function short(value:string, length=48){ return value.length > length ? value.slice(0,length)+'…' : value }
+function conversationActive(item:Conversation){ return !['empty','completed','failed','rejected','cancelled'].includes(item.status) }
 function friendlyText(value:string){
   let result=value || ''
   for(const [name,label] of Object.entries(toolNames)) result=result.replace(new RegExp(`\\b${name}\\b`,'g'),`${label}（${name}）`)
@@ -165,7 +173,11 @@ async function api<T>(url:string, init?:RequestInit):Promise<T>{
   if(!response.ok){ const error=new Error((await response.text()) || `HTTP ${response.status}`) as Error & {status?:number}; error.status=response.status; throw error }
   return response.status===204 ? undefined as T : response.json()
 }
-async function loadConversations(){ conversations.value=await api<Conversation[]>('/api/conversations') }
+async function loadConversations(){
+  const generation=++conversationLoadGeneration
+  const loaded=await api<Conversation[]>('/api/conversations')
+  if(generation===conversationLoadGeneration) conversations.value=loaded
+}
 async function openSettings(){ showSettings.value=true; try{ modelStatus.value=await api<Dict>('/api/model/status') }catch{} }
 async function refreshPrelogin(){
   loginLoading.value=true; loginError.value=''
@@ -184,21 +196,25 @@ async function submitLogin(){
   finally{ loginLoading.value=false }
 }
 async function logout(){ identity.value=await api<Identity>('/api/auth/logout',{method:'POST'}); newChat(); await loadConversations() }
-async function refresh(id:string){
+async function refresh(id:string, generation=viewGeneration){
   const data=await api<{task:Task;events:AgentEvent[]}>(`/api/tasks/${id}`)
-  task.value=data.task; events.value=data.events; currentConversationId.value=data.task.conversation_id || null
   const ids=data.task.conversation_task_ids || []
-  if(ids.join('|')!==pastRuns.value.map(run=>run.task.task_id).join('|')){
-    const loaded=await Promise.all(ids.map(taskId=>api<RunSnapshot>(`/api/tasks/${taskId}`)))
-    pastRuns.value=loaded
-  }
+  const loaded=ids.join('|')===pastRuns.value.map(run=>run.task.task_id).join('|')
+    ? pastRuns.value
+    : await Promise.all(ids.map(taskId=>api<RunSnapshot>(`/api/tasks/${taskId}`)))
+  if(generation!==viewGeneration) return false
+  task.value=data.task; events.value=data.events; currentConversationId.value=data.task.conversation_id || null
+  pastRuns.value=loaded
   busy.value=!['completed','failed','waiting_review','rejected','cancelled'].includes(data.task.status)
+  return true
 }
-function listen(id:string){
+function listen(id:string, generation=viewGeneration){
   source?.close()
   const after=events.value.at(-1)?.sequence || 0
-  source=new EventSource(`/api/tasks/${id}/events?after=${after}`)
-  source.onmessage=async event=>{
+  const stream=new EventSource(`/api/tasks/${id}/events?after=${after}`)
+  source=stream
+  stream.onmessage=async event=>{
+    if(generation!==viewGeneration){ stream.close(); return }
     const item=JSON.parse(event.data) as AgentEvent
     if(!events.value.some(e=>e.sequence===item.sequence)) events.value.push(item)
     if(item.event_type==='general_response_delta' && task.value){
@@ -206,18 +222,50 @@ function listen(id:string){
       busy.value=true
       await nextTick()
       chatScroll.value?.scrollTo({top:chatScroll.value.scrollHeight})
-    }else await refresh(id)
-    if(['workflow_completed','workflow_failed','workflow_cancelled'].includes(item.event_type)) source?.close()
+    }else await refresh(id,generation)
+    if(['workflow_completed','workflow_failed','workflow_cancelled'].includes(item.event_type)){
+      stream.close()
+      await loadConversations().catch(()=>{})
+    }
   }
-  source.onerror=()=>{ if(!taskDone.value) window.setTimeout(()=>listen(id),1800) }
+  stream.onerror=()=>{
+    stream.close()
+    if(generation===viewGeneration && !taskDone.value) window.setTimeout(()=>{
+      if(generation===viewGeneration) listen(id,generation)
+    },1800)
+  }
 }
-async function restore(id:string){
-  try { await refresh(id); if(!taskDone.value) listen(id) }
+async function restore(id:string, generation=viewGeneration){
+  try { const restored=await refresh(id,generation); if(restored && !taskDone.value) listen(id,generation) }
   catch { localStorage.removeItem('scidemo-task') }
 }
+async function restoreConversation(conversationId:string,generation:number){
+  const data=await api<ConversationSnapshot>(`/api/conversations/${conversationId}`)
+  if(generation!==viewGeneration)return
+  if(!data.task){
+    task.value=null; events.value=[]; pastRuns.value=[]; busy.value=false
+    localStorage.removeItem('scidemo-task')
+    return
+  }
+  const ids=data.task.conversation_task_ids || []
+  const loaded=await Promise.all(ids.map(taskId=>api<RunSnapshot>(`/api/tasks/${taskId}`)))
+  if(generation!==viewGeneration)return
+  task.value=data.task; events.value=data.events; pastRuns.value=loaded
+  busy.value=!['completed','failed','waiting_review','rejected','cancelled'].includes(data.task.status)
+  localStorage.setItem('scidemo-task',data.task.task_id)
+  if(busy.value)listen(data.task.task_id,generation)
+}
 async function selectConversation(item:Conversation){
-  if(item.task_id){ await restore(item.task_id); localStorage.setItem('scidemo-task',item.task_id); return }
-  source?.close(); task.value=null; events.value=[]; pastRuns.value=[]; busy.value=false; currentConversationId.value=item.conversation_id
+  const generation=++viewGeneration
+  source?.close(); currentConversationId.value=item.conversation_id; loadingConversationId.value=item.conversation_id
+  try{ await restoreConversation(item.conversation_id,generation) }
+  catch(error){
+    if(generation===viewGeneration){
+      currentConversationId.value=task.value?.conversation_id || null
+      if(task.value && busy.value)listen(task.value.task_id,generation)
+      window.alert((error as Error).message || '恢复会话失败')
+    }
+  }finally{ if(generation===viewGeneration)loadingConversationId.value=null }
 }
 async function renameConversation(item:Conversation){
   conversationMenu.value=null
@@ -227,21 +275,42 @@ async function renameConversation(item:Conversation){
 }
 async function deleteConversation(item:Conversation){
   conversationMenu.value=null
+  if(conversationActive(item)){
+    window.alert('该会话仍在运行或等待审核。请先进入会话停止任务，再执行删除。')
+    return
+  }
   if(!window.confirm(`删除“${item.title}”？该会话的聊天与执行记录将一并删除。`))return
-  await api(`/api/conversations/${item.conversation_id}`,{method:'DELETE'})
-  if(currentConversationId.value===item.conversation_id) await newChat(); else await loadConversations()
+  deletingConversationId.value=item.conversation_id
+  try{
+    await api(`/api/conversations/${item.conversation_id}`,{method:'DELETE'})
+    if(currentConversationId.value===item.conversation_id){
+      ++viewGeneration
+      source?.close(); task.value=null; events.value=[]; pastRuns.value=[]; selected.value=null; busy.value=false
+      currentConversationId.value=null; loadingConversationId.value=null; localStorage.removeItem('scidemo-task')
+    }
+    await loadConversations()
+  }catch(error){
+    await loadConversations().catch(()=>{})
+    window.alert((error as Error).message || '删除会话失败')
+  }finally{ deletingConversationId.value=null }
 }
 async function run(){
-  if(query.value.trim().length<1 || busy.value || submitting.value)return
+  if(query.value.trim().length<1 || busy.value || submitting.value || loadingConversationId.value)return
   const submitted=query.value.trim()
   const parentTaskId=task.value?.task_id
+  const generation=viewGeneration
   submitting.value=true; selected.value=null
   try{
     const data=await api<{task_id:string}>('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:submitted,parent_task_id:parentTaskId,conversation_id:currentConversationId.value,teaching_mode:teaching.value,require_review:teaching.value,model_backend:modelBackend.value,tolerance:tolerance.value,max_retries:retries.value})})
+    await loadConversations()
+    if(generation!==viewGeneration)return
     localStorage.setItem('scidemo-task',data.task_id)
     query.value=''; await nextTick(); resizeComposer()
-    busy.value=true; await refresh(data.task_id); listen(data.task_id); await loadConversations()
+    busy.value=true
+    const refreshed=await refresh(data.task_id,generation)
+    if(refreshed) listen(data.task_id,generation)
   }catch(error){
+    if(generation!==viewGeneration)return
     busy.value=false
     if((error as Error & {status?:number}).status===403){
       await newChat()
@@ -256,23 +325,29 @@ async function run(){
 }
 async function review(action:'approve'|'modify'|'reject'){
   if(!task.value)return
+  const taskId=task.value.task_id
+  const generation=viewGeneration
   busy.value=true
-  await api(`/api/tasks/${task.value.task_id}/review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,parameters:{tolerance:tolerance.value},comment:''})})
-  listen(task.value.task_id); window.setTimeout(()=>task.value && refresh(task.value.task_id),150)
+  await api(`/api/tasks/${taskId}/review`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,parameters:{tolerance:tolerance.value},comment:''})})
+  if(generation!==viewGeneration)return
+  listen(taskId,generation); window.setTimeout(()=>{ if(generation===viewGeneration)refresh(taskId,generation) },150)
 }
 async function cancelGeneration(){
   if(!task.value || !busy.value)return
-  await api(`/api/tasks/${task.value.task_id}/cancel`,{method:'POST'})
-  source?.close(); await refresh(task.value.task_id)
+  const taskId=task.value.task_id
+  const generation=viewGeneration
+  await api(`/api/tasks/${taskId}/cancel`,{method:'POST'})
+  if(generation!==viewGeneration)return
+  source?.close(); await refresh(taskId,generation); await loadConversations()
 }
 async function newChat(){
-  if(creatingConversation.value)return
-  const current=conversations.value.find(item=>item.conversation_id===currentConversationId.value)
-  if(!task.value && current && !current.task_id){ nextTick(()=>composer.value?.focus()); return }
-  creatingConversation.value=true
+  if(!task.value && currentConversationId.value===null){ nextTick(()=>composer.value?.focus()); return }
+  ++viewGeneration
   source?.close(); task.value=null; events.value=[]; pastRuns.value=[]; selected.value=null; busy.value=false; submitting.value=false; localStorage.removeItem('scidemo-task')
-  try{ const created=await api<Conversation>('/api/conversations',{method:'POST'}); currentConversationId.value=created.conversation_id; await loadConversations() }catch{ currentConversationId.value=null }
-  finally{ creatingConversation.value=false }
+  // Keep this as an unsaved draft. The backend creates the real conversation
+  // together with its first task, so an empty row cannot replace the previous
+  // conversation in the history list.
+  currentConversationId.value=null; loadingConversationId.value=null
   nextTick(()=>composer.value?.focus())
 }
 function onComposerKey(e:KeyboardEvent){ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); run() } }
@@ -286,9 +361,10 @@ onMounted(async()=>{
   await loadConversations().catch(()=>{})
   const id=localStorage.getItem('scidemo-task'); if(id) await restore(id)
   poller=window.setInterval(()=>task.value && !taskDone.value && refresh(task.value.task_id),2200)
+  conversationPoller=window.setInterval(()=>loadConversations().catch(()=>{}),5000)
   resizeComposer()
 })
-onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
+onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller); if(conversationPoller)clearInterval(conversationPoller) })
 </script>
 
 <template>
@@ -303,13 +379,13 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
 
     <main class="workspace">
       <aside class="history-pane">
-        <div class="pane-head"><span>会话</span><button class="new-button sidebar-new" :disabled="creatingConversation" @click="newChat"><span>＋</span>{{ creatingConversation ? '创建中' : '新会话' }}</button></div>
+        <div class="pane-head"><span>会话</span><button class="new-button sidebar-new" @click="newChat"><span>＋</span>新会话</button></div>
         <div class="history-scroll">
           <div class="history-label">全部会话</div>
           <div v-for="item in conversations" :key="item.conversation_id" class="history-row">
-            <button class="history-item" :class="{active:item.conversation_id===currentConversationId}" @click="selectConversation(item)"><span class="history-icon">◷</span><span><b>{{ item.title }}</b><small>{{ item.status==='empty'?'空白会话':item.status }}</small></span></button>
+            <button class="history-item" :class="{active:item.conversation_id===currentConversationId}" @click="selectConversation(item)"><span class="history-icon">◷</span><span><b>{{ item.title }}</b><small>{{ loadingConversationId===item.conversation_id?'正在恢复…':item.status==='empty'?'空白会话':item.status }}</small></span></button>
             <button class="history-more" aria-label="会话菜单" @click.stop="conversationMenu=conversationMenu===item.conversation_id?null:item.conversation_id">•••</button>
-            <div v-if="conversationMenu===item.conversation_id" class="history-menu"><button @click="renameConversation(item)">重命名</button><button class="danger" @click="deleteConversation(item)">删除会话</button></div>
+            <div v-if="conversationMenu===item.conversation_id" class="history-menu"><button @click="renameConversation(item)">重命名</button><button class="danger" :disabled="conversationActive(item) || deletingConversationId===item.conversation_id" :title="conversationActive(item)?'请先停止运行中的任务':'删除会话'" @click="deleteConversation(item)">{{ deletingConversationId===item.conversation_id?'删除中…':'删除会话' }}</button></div>
           </div>
         </div>
         <div class="sidebar-resources">
@@ -406,7 +482,7 @@ onBeforeUnmount(()=>{ source?.close(); if(poller)clearInterval(poller) })
             <textarea ref="composer" v-model="query" rows="1" placeholder="输入一个科学计算问题…" @keydown="onComposerKey" @input="resizeComposer"></textarea>
             <div class="composer-bar">
               <div></div>
-              <div><span>{{ query.length }}/2000</span><button v-if="busy && !submitting" class="cancel-generation" aria-label="停止模型生成" @click="cancelGeneration">■ 停止生成</button><button v-else class="send" :disabled="query.trim().length<1 || submitting" @click="run">{{ submitting ? '…' : '↑' }}</button></div>
+              <div><span>{{ query.length }}/2000</span><button v-if="busy && !submitting" class="cancel-generation" aria-label="停止模型生成" @click="cancelGeneration">■ 停止生成</button><button v-else class="send" :disabled="query.trim().length<1 || submitting || Boolean(loadingConversationId)" @click="run">{{ submitting || loadingConversationId ? '…' : '↑' }}</button></div>
             </div>
           </div>
           <p>Enter 发送 · Shift + Enter 换行 · 结果由程序验证，仍需结合问题条件判断</p>
