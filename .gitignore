@@ -1,6 +1,7 @@
 # uv / Python virtual environments
 .venv/
 .venv-model/
+.codex-build/
 venv/
 env/
 
