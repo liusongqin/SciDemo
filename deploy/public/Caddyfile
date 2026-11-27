@@ -1,0 +1,22 @@
+{
+	# A dedicated service must not share the default Caddy admin endpoint.
+	admin off
+	# IP certificates are supplied explicitly; leave existing :80 sites alone.
+	auto_https disable_redirects
+	# IP-address HTTPS clients may omit SNI; still select the configured certificate.
+	default_sni {$SCIDEMO_SERVER_NAME}
+}
+
+{$SCIDEMO_SITE} {
+	{$SCIDEMO_TLS}
+
+	# Forward every path to the internal application gateway. The public host
+	# contains no frontend, backend, or model application files.
+	reverse_proxy 127.0.0.1:18000 {
+		# Deliver FastAPI SSE events immediately; preserve all request paths.
+		flush_interval -1
+	}
+
+	header X-Content-Type-Options nosniff
+	header Referrer-Policy strict-origin-when-cross-origin
+}

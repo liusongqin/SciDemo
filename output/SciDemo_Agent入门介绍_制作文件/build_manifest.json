@@ -1,0 +1,11 @@
+{
+  "slides": 5,
+  "outline": "SciDemo_Agent入门介绍_逐页讲稿.md",
+  "outline_sha256": "3303338540fd840d28334024da6677faef5bcbafe32205a266ff25bcf8b2a235",
+  "presentation": "SciDemo_Agent入门介绍.pptx",
+  "editable_text_and_shapes": true,
+  "speaker_notes": true,
+  "font": "Noto Sans CJK SC",
+  "example_root": 1.4142135623731364,
+  "example_residual": 1.1723955140041653e-13
+}

@@ -1,0 +1,30 @@
+{
+	admin off
+	auto_https disable_redirects
+	# IP clients commonly omit SNI; use the managed IP certificate for them.
+	default_sni 161.114.15.77
+}
+
+# Keep port 80 available for ACME HTTP-01, including automatic renewals.
+# Caddy intercepts valid ACME challenges; other HTTP requests get no application content.
+http://161.114.15.77:80 {
+	respond "Not Found" 404
+}
+
+https://161.114.15.77:8443 {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+
+	# All application content remains on the internal host.
+	reverse_proxy 127.0.0.1:18000 {
+		flush_interval -1
+	}
+
+	header X-Content-Type-Options nosniff
+	header Referrer-Policy strict-origin-when-cross-origin
+}

@@ -39,3 +39,6 @@ Thumbs.db
 
 # Model checkpoints and logs
 models/
+
+# Production binaries, credentials, certificates and deployment bundles
+run/production/

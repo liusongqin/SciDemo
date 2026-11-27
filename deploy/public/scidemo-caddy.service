@@ -1,0 +1,30 @@
+[Unit]
+Description=SciDemo HTTPS forwarding gateway
+Wants=network-online.target
+After=network-online.target scidemo-frps.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=scidemo-caddy
+Group=scidemo-caddy
+EnvironmentFile=/etc/scidemo/public.env
+Environment=XDG_DATA_HOME=/var/lib/scidemo-caddy/data
+Environment=XDG_CONFIG_HOME=/var/lib/scidemo-caddy/config
+WorkingDirectory=/var/lib/scidemo-caddy
+ExecStart=/usr/local/bin/scidemo-caddy run --config /etc/scidemo/Caddyfile --adapter caddyfile
+Restart=always
+RestartSec=5
+StateDirectory=scidemo-caddy
+StateDirectoryMode=0700
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/scidemo-caddy
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

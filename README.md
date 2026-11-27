@@ -26,6 +26,8 @@ backend/tests/  工具、安全、闭环、重试、人工恢复测试
 
 要求 Python 3.11+、uv、Node.js 20+。
 
+长期运行及公网访问使用 [内网部署与公网转发说明](deploy/README.md)：前端、后端和模型均留在内网，公网仅提供 frp 与 Caddy 转发；以下命令保留为开发及旧 SSH 启动方式。
+
 ```bash
 uv sync --inexact
 npm --prefix frontend install
@@ -42,6 +44,51 @@ chmod +x scripts/start.sh scripts/dev.sh scripts/serve-model.sh
 uv run uvicorn app.main:app --app-dir backend --reload --port 8000
 npm --prefix frontend run dev
 ```
+
+## 日常开启与关闭（已部署环境）
+
+访问地址：<https://161.114.15.77:8443>；API 健康检查：<https://161.114.15.77:8443/api/health>。前端、API 和模型都在内网，公网只转发。
+
+以下命令在**内网服务器**以部署用户 `liusongqin` 执行，使用 `systemctl --user`。服务已设为开机自启，日常管理直接使用以下命令。
+
+开启全部服务：
+
+```bash
+systemctl --user start scidemo-model scidemo-api scidemo-gateway scidemo-frpc
+```
+
+关闭全部服务，同时停止模型、释放其占用的 GPU 显存：
+
+```bash
+systemctl --user stop scidemo-frpc scidemo-gateway scidemo-api scidemo-model
+```
+
+查看状态和最近日志：
+
+```bash
+systemctl --user status scidemo-model scidemo-api scidemo-gateway scidemo-frpc --no-pager
+journalctl --user -u scidemo-model -u scidemo-api -u scidemo-gateway -u scidemo-frpc -n 80 --no-pager
+```
+
+只暂停对外访问、保留本机服务和已加载模型：执行 `systemctl --user stop scidemo-frpc`；恢复访问执行 `systemctl --user start scidemo-frpc`。公网 Caddy 可继续运行并自动续签公开证书。
+
+更新后端后执行 `systemctl --user restart scidemo-api`。更新前端只需在项目根目录执行 `npm --prefix frontend run build`。模型初次启动或重启需要加载时间，`curl -fsS http://127.0.0.1:8001/v1/models` 返回模型列表后才算就绪；API 的 health 正常不代表模型已就绪。停止或重启 API 前先结束当前任务，内存中的运行任务和人工中断状态不能跨重启恢复。
+
+`stop` 只停止本次运行，机器重启后仍会自动启动；若需要停用开机自启，在内网执行：
+
+```bash
+systemctl --user disable --now scidemo-frpc scidemo-gateway scidemo-api scidemo-model
+```
+
+重新启用开机自启并立即开启：
+
+```bash
+systemctl --user enable --now scidemo-model scidemo-api scidemo-gateway scidemo-frpc
+```
+
+若需单独管理**公网服务器**的转发，在公网使用 `sudo systemctl start scidemo-frps scidemo-caddy` 或 `sudo systemctl stop scidemo-frps scidemo-caddy`（不加 `--user`）。停公网转发不会释放内网 GPU；长期停止公网 Caddy 会暂停证书续期。
+
+更多单服务重启、实时日志和验证命令见 [内网日常服务管理](deploy/README.md#日常服务管理内网服务器) 和 [公网服务管理](deploy/public/README.md)。生产服务运行期间不要同时执行旧 `scripts/start.sh`，避免端口冲突。
 
 ## 模型模式
 

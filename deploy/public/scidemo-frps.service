@@ -1,0 +1,21 @@
+[Unit]
+Description=SciDemo frp server (private API tunnel)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=scidemo-frps
+Group=scidemo-frps
+ExecStart=/usr/local/bin/scidemo-frps -c /etc/scidemo/frps.toml
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
