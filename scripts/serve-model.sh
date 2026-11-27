@@ -15,6 +15,6 @@ fi
 
 exec "$VLLM_BIN" serve "$MODEL_PATH" \
   --served-model-name "$MODEL_NAME" --host 127.0.0.1 --port 8001 \
-  --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization 0.8 \
+  --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" --max-model-len "$MAX_MODEL_LEN" --gpu-memory-utilization 0.9 \
   --enable-auto-tool-choice --tool-call-parser qwen3_xml \
   --reasoning-parser qwen3 --enforce-eager

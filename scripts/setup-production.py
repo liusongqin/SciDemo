@@ -23,6 +23,7 @@ SHA256 = "daf719b32ca2778770bb92955e231a07414d754378b9af328aa2642862479804"
 CADDY_VERSION = "2.11.9"
 CADDY_SHA256 = "5b8cb7faf8726a2028ad96a66e54e6e81e8f361bc6175e5d22bbd997cc5177fb"
 ROLES = ("model", "api", "gateway", "frpc")
+WEB_ROLES = ("api", "gateway", "frpc")
 
 
 def run(*args: str, quiet: bool = False) -> None:
@@ -244,9 +245,8 @@ def install_services() -> None:
     units = Path.home() / ".config/systemd/user"
     units.mkdir(parents=True, exist_ok=True)
     for role in ROLES:
-        # Restart network transport independently of the model and API.
-        after = "After=network-online.target\n" if role != "api" else "After=scidemo-model.service\n"
-        content = (f"[Unit]\nDescription=SciDemo production {role}\n{after}StartLimitIntervalSec=0\n\n"
+        # Each service starts independently; the model is managed manually.
+        content = (f"[Unit]\nDescription=SciDemo production {role}\nAfter=network-online.target\nStartLimitIntervalSec=0\n\n"
                    f"[Service]\nType=simple\nWorkingDirectory={str(ROOT).replace('%', '%%')}\n"
                    f"ExecStart=/bin/bash {json.dumps(str(ROOT / 'scripts/serve-production.sh'))} {role}\n"
                    "Restart=always\nRestartSec=10\nTimeoutStopSec=90\nKillMode=control-group\n"
@@ -255,12 +255,13 @@ def install_services() -> None:
     run("systemctl", "--user", "daemon-reload")
     run("systemd-analyze", "--user", "verify", *(str(units / f"scidemo-{role}.service")
                                                for role in ROLES))
-    run("systemctl", "--user", "enable", *(f"scidemo-{role}.service" for role in ROLES))
+    # Migrate existing installations without interrupting a manually started model.
+    run("systemctl", "--user", "disable", "scidemo-model.service")
+    run("systemctl", "--user", "enable", *(f"scidemo-{role}.service" for role in WEB_ROLES))
     # Linger is a host-level setting; enable it explicitly with existing administrator access.
     run("sudo", "-n", "loginctl", "enable-linger", str(os.getuid()))
-    # Reconfiguring the web gateway must not reload a healthy GPU model.
-    run("systemctl", "--user", "start", "scidemo-model.service")
-    run("systemctl", "--user", "restart", "scidemo-api.service", "scidemo-gateway.service", "scidemo-frpc.service")
+    run("systemctl", "--user", "restart", *(f"scidemo-{role}.service" for role in WEB_ROLES))
+    print("Web services started. Start the local model when needed: systemctl --user start scidemo-model")
 
 
 if __name__ == "__main__":

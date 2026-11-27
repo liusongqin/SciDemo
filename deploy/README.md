@@ -1,6 +1,6 @@
 # 内网部署与公网转发
 
-前端、FastAPI 和 vLLM 全部运行在内网服务器。公网服务器只运行 frps 和 Caddy，提供加密隧道及 HTTPS 转发，不部署任何前端静态文件、API 源码或模型。
+前端、FastAPI 和按需启用的 vLLM 全部运行在内网服务器。默认只启动网页、API 和隧道；本地模型由用户手动开启、关闭。公网服务器只运行 frps 和 Caddy，提供加密隧道及 HTTPS 转发，不部署任何前端静态文件、API 源码或模型。
 
 ```text
 浏览器 https://161.114.15.77:8443
@@ -17,7 +17,7 @@ frpc 只映射内网 `8088` 到公网回环 `18000`。内网三个入口都仅�
 
 ## 内网准备与启动
 
-在项目根目录执行，要求现有 `.venv`、模型和前端依赖已安装：
+在项目根目录执行，要求现有 `.venv` 和前端依赖已安装；使用本地推理时再单独准备 vLLM 和模型：
 
 ```bash
 cd /home/liusongqin/code/SciDemo
@@ -30,37 +30,73 @@ python3 scripts/setup-production.py \
 
 脚本下载固定版本并校验 SHA256：frp `0.72.0`、内网 Caddy `2.11.9`；生成隧道配置、证书和公网网关部署包；校验配置后安装四个 **systemd 用户服务**：
 
-| 用户服务 | 作用 |
-| --- | --- |
-| `scidemo-model.service` | 本地 vLLM，回环 `8001` |
-| `scidemo-api.service` | FastAPI，回环 `8000`，单 worker，无热重载 |
-| `scidemo-gateway.service` | 本地 Caddy，回环 `8088`，托管本机前端并转发 API |
-| `scidemo-frpc.service` | 主动连接公网 `7000`，将本地 `8088` 映射为公网回环 `18000` |
+| 用户服务 | 作用 | 安装后的状态 |
+| --- | --- | --- |
+| `scidemo-model.service` | 本地 vLLM，回环 `8001` | 不自动启动，禁用开机自启 |
+| `scidemo-api.service` | FastAPI，回环 `8000`，单 worker，无热重载 | 启动并启用开机自启 |
+| `scidemo-gateway.service` | 本地 Caddy，回环 `8088`，托管本机前端并转发 API | 启动并启用开机自启 |
+| `scidemo-frpc.service` | 主动连接公网 `7000`，将本地 `8088` 映射为公网回环 `18000` | 启动并启用开机自启 |
+
+安装脚本只禁用模型的开机自启，不会主动启动或停止用户已手动开启的模型。旧部署首次迁移到按需模型模式时，执行一次以下命令，停止旧模型并取消原有开机自启：
+
+```bash
+systemctl --user disable --now scidemo-model
+```
 
 本机用户 linger 已开启，服务在退出登录后继续运行，开机无须先交互登录。脚本也会使用 `sudo -n loginctl enable-linger` 确保此设置；在其他服务器上执行时需要相应管理员权限。可通过 `loginctl show-user "$USER" -p Linger` 核查。
 
-服务分别重启；隧道断线会重连，不需要重启模型。API 使用单 worker，因为当前任务、人工审核和 SSE 状态包含进程内数据。API 启动不代表 GPU 模型已加载完成，应检查模型接口。
+服务分别重启；隧道断线会重连，不需要重启模型。API 不依赖模型服务启动，使用单 worker，因为当前任务、人工审核和 SSE 状态包含进程内数据。模型关闭时可选择外部 API 或 Mock；本地模式会报告不可用，不会自动唤醒模型。API 启动不代表 GPU 模型已加载完成，应在手动启动模型后检查模型接口。
 
 ## 日常服务管理（内网服务器）
 
 在内网服务器以部署用户 `liusongqin` 执行以下命令，使用 `systemctl --user`，不加 `sudo`。日常开关服务无需重新运行安装脚本，也无需保持 SSH 会话或终端窗口。
 
-### 开启全部服务
+### 开启网页、API 和隧道
 
 ```bash
-systemctl --user start scidemo-model scidemo-api scidemo-gateway scidemo-frpc
+systemctl --user start scidemo-api scidemo-gateway scidemo-frpc
 ```
 
-公网 frps、Caddy 也需处于运行状态；内网 frpc 会自动重连。模型需要加载时间，可以分别检查本机网关与模型是否就绪：
+公网 frps、Caddy 也需处于运行状态；内网 frpc 会自动重连。该命令不会加载模型，可以先检查网页服务：
 
 ```bash
 curl -fsS http://127.0.0.1:8088/api/health
+```
+
+### 手动开启、关闭本地模型
+
+需要本地推理时开启模型：
+
+```bash
+systemctl --user start scidemo-model
+```
+
+加载需要时间；查看状态与日志，并等待模型列表返回：
+
+```bash
+systemctl --user status scidemo-model --no-pager
+journalctl --user -u scidemo-model -n 80 --no-pager
 curl -fsS http://127.0.0.1:8001/v1/models
 ```
 
-### 关闭全部服务并释放模型显存
+使用结束后，先结束本地模型任务，再停止模型：
 
-先结束正在运行或等待人工审核的任务，再执行：
+```bash
+systemctl --user stop scidemo-model
+nvidia-smi
+```
+
+这会释放本项目模型占用的 GPU 显存，网页、API 和隧道继续运行；选择外部 API 或 Mock 可继续使用。模型保持禁用开机自启，重新使用时再次手动 `start`。只有主动重新加载模型时才执行 `systemctl --user restart scidemo-model`；该命令也会启动原本关闭的模型。
+
+### 关闭网页服务或全部服务
+
+只关闭网页、API 和隧道：
+
+```bash
+systemctl --user stop scidemo-frpc scidemo-gateway scidemo-api
+```
+
+需要同时停止已手动开启的模型时，先结束正在运行或等待人工审核的任务，再执行：
 
 ```bash
 systemctl --user stop scidemo-frpc scidemo-gateway scidemo-api scidemo-model
@@ -73,7 +109,7 @@ systemctl --user status scidemo-model scidemo-api scidemo-gateway scidemo-frpc -
 nvidia-smi
 ```
 
-显式 `systemctl stop` 后，服务的异常重启策略不会把它立即拉起，但开机自启设置仍然保留。
+显式 `systemctl stop` 后，服务的异常重启策略不会把它立即拉起。网页服务的开机自启设置仍然保留；模型默认禁用开机自启。
 
 ### 只暂停公网访问，保留本机服务
 
@@ -89,7 +125,7 @@ systemctl --user stop scidemo-frpc
 systemctl --user start scidemo-frpc
 ```
 
-模型继续占用显存，可在恢复时直接复用；公网入口在隧道断开期间通常返回 502。公网 Caddy 继续运行，有利于公开 IP 证书自动续期。若需要释放 GPU 显存，应使用上面的“关闭全部服务”。
+若模型此前已手动开启，它会继续占用显存，可在恢复时直接复用；公网入口在隧道断开期间通常返回 502。公网 Caddy 继续运行，有利于公开 IP 证书自动续期。若仅需释放模型显存，执行 `systemctl --user stop scidemo-model` 即可。
 
 ### 按改动重启单项服务
 
@@ -98,31 +134,31 @@ systemctl --user start scidemo-frpc
 | 更新后端代码或 API 环境变量 | `systemctl --user restart scidemo-api` |
 | 修改 `deploy/local/Caddyfile` | `systemctl --user restart scidemo-gateway` |
 | 修改 `run/production/frpc.toml` | `systemctl --user restart scidemo-frpc` |
-| 修改模型参数或需要重新加载模型 | `systemctl --user restart scidemo-model` |
+| 用户主动重新加载模型，包括应用模型参数修改 | `systemctl --user restart scidemo-model`；会启动原本关闭的模型 |
 | 更新前端代码 | 在项目根目录执行 `npm --prefix frontend run build`，无需重启服务 |
 
-需要完整重启时：
+需要重启全部网页服务时：
 
 ```bash
-systemctl --user restart scidemo-model scidemo-api scidemo-gateway scidemo-frpc
+systemctl --user restart scidemo-api scidemo-gateway scidemo-frpc
 ```
 
-完整重启会重新加载 GPU 模型；日常只重启有改动的服务即可。修改 `.env.production` 后，需重启实际读取该选项的服务；例如模型参数需要重启 `scidemo-model`，仅重启 API 不会重载模型。
+网页重启不会启动或重载 GPU 模型；日常只重启有改动的服务即可。修改 `.env.production` 后，需重启实际读取该选项的服务；模型参数在下次手动启动时生效，若模型正在运行且需立即应用，再主动重启 `scidemo-model`。
 
 ### 开机自启与长期停用
 
-当前四项服务均已启用开机自启，用户 linger 已开启。`start/stop/restart` 管理当前运行状态；`enable/disable` 管理开机自启；加 `--now` 才会同时启动或停止当前进程。
+API、网页网关和隧道三项服务启用开机自启，模型保持禁用；用户 linger 已开启。`start/stop/restart` 管理当前运行状态；`enable/disable` 管理开机自启；加 `--now` 才会同时启动或停止当前进程。
 
-立即关闭，并禁止以后开机自动启动：
+立即关闭网页服务，并禁止它们以后开机自动启动：
 
 ```bash
-systemctl --user disable --now scidemo-frpc scidemo-gateway scidemo-api scidemo-model
+systemctl --user disable --now scidemo-frpc scidemo-gateway scidemo-api
 ```
 
-恢复开机自启，并立即开启：
+恢复网页服务的开机自启，并立即开启：
 
 ```bash
-systemctl --user enable --now scidemo-model scidemo-api scidemo-gateway scidemo-frpc
+systemctl --user enable --now scidemo-api scidemo-gateway scidemo-frpc
 ```
 
 查看自启设置：
@@ -135,7 +171,7 @@ systemctl --user is-enabled scidemo-model scidemo-api scidemo-gateway scidemo-fr
 
 ## 配置与 SSH 保留
 
-原 `.env` 和 `scripts/start.sh` 保持原样，初次准备时另存到 `run/production/legacy-ssh/`，保留旧 SSH 方案。生产启动由 `scripts/serve-production.sh` 先加载 `.env`，再加载 `.env.production` 覆盖生产选项：
+安装脚本保留 `.env` 和旧 SSH 配置，初次准备时将 `.env`、`scripts/start.sh` 另存到 `run/production/legacy-ssh/`。当前 `scripts/start.sh` 默认只启动前后端及已配置的 SSH 转发，不自动加载模型。生产启动由 `scripts/serve-production.sh` 先加载 `.env`，再加载 `.env.production` 覆盖生产选项：
 
 ```text
 FRONTEND_URL=https://161.114.15.77:8443
@@ -145,7 +181,9 @@ SSH_REVERSE_TUNNEL_ENABLED=false
 VLLM_USE_FLASHINFER_SAMPLER=0
 ```
 
-其中 `VLLM_USE_FLASHINFER_SAMPLER=0` 是本机针对现有 CUDA JIT 不兼容的覆盖，禁用 FlashInfer sampler，保留 `.env`；重新生成配置会保留这一自定义项。生产服务不运行旧 SSH 启动逻辑。**生产运行期间不要同时执行 `scripts/start.sh`**，以免争用模型、API 端口或重复启动旧转发。
+其中 `VLLM_USE_FLASHINFER_SAMPLER=0` 是本机针对现有 CUDA JIT 不兼容的覆盖，禁用 FlashInfer sampler，保留 `.env`；重新生成配置会保留这一自定义项及已设置的单卡、上下文等模型参数。生产服务不运行旧 SSH 启动逻辑。**生产运行期间不要同时执行 `scripts/start.sh`**，以免争用 API、网页端口或重复启动旧转发。
+
+开发时需要本地模型，可在独立终端执行 `bash scripts/serve-production.sh model`，同样读取 `.env` 和 `.env.production`，按 `Ctrl+C` 停止。已安装用户服务时优先使用上文 `systemctl --user start/stop scidemo-model`；不要同时运行两份模型进程。
 
 生成的 Token、隧道 CA 和网页 CA 私钥留在内网 `run/production/`，目录权限为 `0700`。`.env.production` 和该运行目录不会提交到 Git。`run/production/legacy-ssh/.env` 包含原环境配置，也应按私密文件保管。
 
@@ -158,8 +196,9 @@ systemctl --user status scidemo-model scidemo-api scidemo-gateway scidemo-frpc -
 journalctl --user -u scidemo-model -u scidemo-api -u scidemo-gateway -u scidemo-frpc -n 80 --no-pager
 curl -fsS http://127.0.0.1:8088/
 curl -fsS http://127.0.0.1:8088/api/health
-curl -fsS http://127.0.0.1:8001/v1/models
 ```
+
+模型显示 `inactive`、`disabled` 是默认状态。只有手动启动本地模型后，才用 `curl -fsS http://127.0.0.1:8001/v1/models` 检查其就绪状态。
 
 实时跟踪日志，例如排查隧道与模型：
 
@@ -176,7 +215,7 @@ journalctl --user -u scidemo-model -f
 curl -fsS https://161.114.15.77:8443/api/health
 ```
 
-仍使用旧自建 CA 时，验证命令需额外加 `--cacert /home/liusongqin/code/SciDemo/run/production/web-ca.crt`。单服务重启及完整重启命令见上文日常服务管理。
+仍使用旧自建 CA 时，验证命令需额外加 `--cacert /home/liusongqin/code/SciDemo/run/production/web-ca.crt`。单服务重启及网页服务整体重启命令见上文日常服务管理。
 
 ## 公网交付与网页证书
 
@@ -205,4 +244,4 @@ systemctl --user disable --now scidemo-frpc scidemo-gateway scidemo-api scidemo-
 ./scripts/start.sh
 ```
 
-旧脚本读取保留的原 `.env`，不读取 `.env.production`；SSH 目的主机和端口也按原 `.env` 生效，回退前应核对其仍是预期的旧入口。需要恢复生产方案时，停止旧启动脚本及其子进程，再执行上文准备与启动命令。不要同时运行两套启动方式。
+旧入口 `scripts/start.sh` 读取保留的原 `.env`，不读取 `.env.production`；SSH 目的主机和端口也按原 `.env` 生效，回退前应核对其仍是预期的旧入口。它默认不启动模型；需要本地推理时另开终端手动运行 `bash scripts/serve-production.sh model`，并留意该模型命令会读取 `.env.production`。需要恢复生产方案时，停止旧启动脚本及其子进程，再执行上文准备与启动命令。不要同时运行两套网页启动方式或重复启动模型。

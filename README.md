@@ -1,6 +1,6 @@
 # SciDemo：科学计算 Agent 教学工作流
 
-SciDemo 是一个本地模型驱动的多 Agent 科学计算教学系统。默认连接本机 vLLM：多个职责隔离的 Agent 在共享任务账本上协作，SymPy/SciPy/NumPy 执行计算，独立验证 Agent 检查每次结果。网页可关闭“调用本地 Qwen 模型”使用离线 Mock。
+SciDemo 是一个多 Agent 科学计算教学系统：多个职责隔离的 Agent 在共享任务账本上协作，SymPy/SciPy/NumPy 执行计算，独立验证 Agent 检查每次结果。任务可使用本机 vLLM、外部 API 或离线 Mock；网页和 API 默认独立启动，本地模型由用户手动开启、关闭。
 
 ## 架构
 
@@ -36,7 +36,7 @@ chmod +x scripts/start.sh scripts/dev.sh scripts/serve-model.sh
 ./scripts/start.sh
 ```
 
-打开 <http://127.0.0.1:5173>。API 文档位于 <http://127.0.0.1:8000/docs>。也可分别启动：
+打开 <http://127.0.0.1:5173>。API 文档位于 <http://127.0.0.1:8000/docs>。`scripts/start.sh` 只启动前后端及已配置的旧 SSH 转发，不启动或等待本地模型；可先选择“外部 API”或 Mock，需要本地推理时按下文手动启动模型。也可分别启动：
 
 前端和 Agent API 默认监听所有网卡，局域网设备可通过 `http://服务器局域网IP:5173` 访问；vLLM 仍只监听本机回环地址，避免直接暴露模型端口。
 
@@ -49,41 +49,66 @@ npm --prefix frontend run dev
 
 访问地址：<https://161.114.15.77:8443>；API 健康检查：<https://161.114.15.77:8443/api/health>。前端、API 和模型都在内网，公网只转发。
 
-以下命令在**内网服务器**以部署用户 `liusongqin` 执行，使用 `systemctl --user`。服务已设为开机自启，日常管理直接使用以下命令。
-
-开启全部服务：
+以下命令在**内网服务器**以部署用户 `liusongqin` 执行，使用 `systemctl --user`。API、网页网关和隧道已设为开机自启；模型默认不启动、不设开机自启。旧部署升级时执行一次以下命令，停止模型并取消其原有自启设置：
 
 ```bash
-systemctl --user start scidemo-model scidemo-api scidemo-gateway scidemo-frpc
+systemctl --user disable --now scidemo-model
 ```
 
-关闭全部服务，同时停止模型、释放其占用的 GPU 显存：
+开启网页、API 和隧道：
 
 ```bash
-systemctl --user stop scidemo-frpc scidemo-gateway scidemo-api scidemo-model
+systemctl --user start scidemo-api scidemo-gateway scidemo-frpc
 ```
 
-查看状态和最近日志：
+重启网页服务不会启动模型：
 
 ```bash
-systemctl --user status scidemo-model scidemo-api scidemo-gateway scidemo-frpc --no-pager
-journalctl --user -u scidemo-model -u scidemo-api -u scidemo-gateway -u scidemo-frpc -n 80 --no-pager
+systemctl --user restart scidemo-api scidemo-gateway scidemo-frpc
 ```
 
-只暂停对外访问、保留本机服务和已加载模型：执行 `systemctl --user stop scidemo-frpc`；恢复访问执行 `systemctl --user start scidemo-frpc`。公网 Caddy 可继续运行并自动续签公开证书。
-
-更新后端后执行 `systemctl --user restart scidemo-api`。更新前端只需在项目根目录执行 `npm --prefix frontend run build`。模型初次启动或重启需要加载时间，`curl -fsS http://127.0.0.1:8001/v1/models` 返回模型列表后才算就绪；API 的 health 正常不代表模型已就绪。停止或重启 API 前先结束当前任务，内存中的运行任务和人工中断状态不能跨重启恢复。
-
-`stop` 只停止本次运行，机器重启后仍会自动启动；若需要停用开机自启，在内网执行：
+关闭网页、API 和隧道：
 
 ```bash
-systemctl --user disable --now scidemo-frpc scidemo-gateway scidemo-api scidemo-model
+systemctl --user stop scidemo-frpc scidemo-gateway scidemo-api
 ```
 
-重新启用开机自启并立即开启：
+**本地模型单独管理。** 需要使用本地 Qwen 时手动开启：
 
 ```bash
-systemctl --user enable --now scidemo-model scidemo-api scidemo-gateway scidemo-frpc
+systemctl --user start scidemo-model
+```
+
+模型加载需要时间；检查状态、日志及就绪接口：
+
+```bash
+systemctl --user status scidemo-model --no-pager
+journalctl --user -u scidemo-model -n 80 --no-pager
+curl -fsS http://127.0.0.1:8001/v1/models
+```
+
+模型列表返回后才算就绪，API 的 health 正常不代表模型已就绪。使用结束后，先结束本地模型任务，再停止模型、释放其占用的 GPU 显存：
+
+```bash
+systemctl --user stop scidemo-model
+```
+
+此时网页和 API 可继续运行，任务选择“外部 API”或 Mock 即可；选择本地模型会报告不可用，不会自动唤醒模型。修改模型参数后，下次手动启动时生效；需要立即重新加载时主动执行 `systemctl --user restart scidemo-model`，该命令也会启动原本关闭的模型。
+
+只暂停对外访问、保留本机服务：执行 `systemctl --user stop scidemo-frpc`；恢复访问执行 `systemctl --user start scidemo-frpc`。若模型原本已开启，它仍继续运行。公网 Caddy 可继续运行并自动续签公开证书。
+
+更新后端后执行 `systemctl --user restart scidemo-api`。更新前端只需在项目根目录执行 `npm --prefix frontend run build`。停止或重启 API 前先结束当前任务，内存中的运行任务和人工中断状态不能跨重启恢复。
+
+网页服务的 `stop` 只停止本次运行，机器重启后仍会自动启动；需要停用网页服务的开机自启时执行：
+
+```bash
+systemctl --user disable --now scidemo-frpc scidemo-gateway scidemo-api
+```
+
+恢复网页服务的开机自启并立即开启：
+
+```bash
+systemctl --user enable --now scidemo-api scidemo-gateway scidemo-frpc
 ```
 
 若需单独管理**公网服务器**的转发，在公网使用 `sudo systemctl start scidemo-frps scidemo-caddy` 或 `sudo systemctl stop scidemo-frps scidemo-caddy`（不加 `--user`）。停公网转发不会释放内网 GPU；长期停止公网 Caddy 会暂停证书续期。
@@ -92,14 +117,19 @@ systemctl --user enable --now scidemo-model scidemo-api scidemo-gateway scidemo-
 
 ## 模型模式
 
-默认连接 `http://127.0.0.1:8001/v1`。vLLM 与后端统一安装在项目 `.venv`；安装时由 uv 根据显卡驱动选择 PyTorch/CUDA：
+本地模式连接 `http://127.0.0.1:8001/v1`，不会自动启动模型。需要本地推理时，单独安装 vLLM；它与后端统一使用项目 `.venv`，安装时由 uv 根据显卡驱动选择 PyTorch/CUDA：
 
 ```bash
 uv pip install --python .venv/bin/python "vllm[bench]==0.30.0" --torch-backend=auto
-bash scripts/serve-model.sh
 ```
 
-启动脚本使用现有 `models/Qwen3.5-9B`、两卡张量并行、16384 上下文，并启用 Qwen3 XML 工具调用解析。`scripts/start.sh` 会等待模型就绪后再启动后端与可视化前端；已有模型服务时会直接复用。工具调用配置参考 [vLLM 官方文档](https://docs.vllm.ai/en/stable/features/tool_calling/)。应用配置为：
+已安装生产服务时，使用上文 `systemctl --user start/stop scidemo-model`。开发时可在独立终端手动运行：
+
+```bash
+bash scripts/serve-production.sh model
+```
+
+此命令先加载 `.env`，再加载 `.env.production` 覆盖配置，按 `Ctrl+C` 停止模型。不要与已运行的 `scidemo-model` 重复启动。模型使用现有 `models/Qwen3.5-9B`，卡数和上下文由 `VLLM_TENSOR_PARALLEL_SIZE`、`CUDA_VISIBLE_DEVICES`、`VLLM_MAX_MODEL_LEN` 等配置控制，保留按显存设置的参数。启动时启用 Qwen3 XML 工具调用解析；工具调用配置参考 [vLLM 官方文档](https://docs.vllm.ai/en/stable/features/tool_calling/)。应用配置为：
 
 ```text
 LLM_PROVIDER=openai-compatible
@@ -135,7 +165,7 @@ SESSION_COOKIE_SECURE=true
 
 ## 课堂演示
 
-1. 启动 vLLM 和前后端，查看右上角模型连接状态。
+1. 启动前后端；演示本地模型时单独启动 vLLM 并等待就绪，也可选择外部 API 或 Mock。查看右上角模型连接状态。
 2. 选择 Newton 示例并勾选教学审核模式，运行后观察模型理解事件。
 3. 点击动态决策节点，检查模型生成的工具名、调用参数和调用 ID，批准首个动作。
 4. 在聊天中的工具记录或右侧执行图点击节点，查看工具返回值、独立残差检查和模型解释。模型收到标准 `assistant.tool_calls → tool` 消息。
