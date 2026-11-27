@@ -1,0 +1,16 @@
+{
+  "slides": 5,
+  "outline": "SciDemo_Agent原理架构与开发思路_逐页方案.md",
+  "outline_sha256": "00292aa0d1616ba8f005937381dd8e81320a3157084370f9d08266030be61ed6",
+  "presentation": "SciDemo_Agent原理架构与开发思路.pptx",
+  "editable": true,
+  "speaker_notes": true,
+  "font": "Noto Sans CJK SC",
+  "topics": [
+    "项目原理",
+    "四角色协作",
+    "系统架构",
+    "开发演进",
+    "设计取舍与改进"
+  ]
+}
