@@ -10,7 +10,8 @@ import re
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+from pptx.enum.dml import MSO_LINE_DASH_STYLE
+from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE, PP_PLACEHOLDER
 from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
 from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
@@ -124,6 +125,42 @@ def circle(slide, x, y, diameter, fill, label="", size=16, color="paper"):
     return obj
 
 
+def demo_picture_placeholder(slide, x, y, w, h):
+    """A native PowerPoint picture placeholder, ready for the user to insert an image."""
+    template = next(ph for layout in prs.slide_layouts for ph in layout.placeholders
+                    if ph.placeholder_format.type == PP_PLACEHOLDER.PICTURE)
+    slide.shapes.clone_placeholder(template)
+    obj = slide.shapes[-1]
+    obj.name = "系统演示图占位（16:9，可插入图片）"
+    obj.left, obj.top, obj.width, obj.height = [Inches(value) for value in (x, y, w, h)]
+    obj.fill.solid()
+    obj.fill.fore_color.rgb = rgb("night_card")
+    obj.line.color.rgb = rgb("night_line")
+    obj.line.width = Pt(1.25)
+    obj.line.dash_style = MSO_LINE_DASH_STYLE.DASH
+    frame = obj.text_frame
+    frame.clear()
+    frame.vertical_anchor = MSO_ANCHOR.TOP
+    frame.margin_left = frame.margin_right = Inches(0.25)
+    frame.margin_top = Inches(0.24)
+    frame.margin_bottom = 0
+    for index, (label, size) in enumerate((("系统演示图", 24), ("（自行插入）", 14))):
+        p = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+        p.alignment = PP_ALIGN.CENTER
+        p.space_after = Pt(12 if index == 0 else 0)
+        run = p.add_run()
+        run.text = label
+        run.font.name = FONT
+        run.font.size = Pt(size)
+        run.font.color.rgb = rgb("night_muted")
+        prop = run._r.get_or_add_rPr()
+        prop.set("lang", "zh-CN")
+        east_asian = OxmlElement("a:ea")
+        east_asian.set("typeface", FONT)
+        prop.append(east_asian)
+    return obj
+
+
 def footer(slide, number, dark=False, note=None):
     lc = "night_line" if dark else "line"
     tc = "night_muted" if dark else "muted"
@@ -160,28 +197,25 @@ def add_notes(slide, number):
     slide.notes_slide.notes_text_frame.text = content
 
 
-# 1. Define the mechanism through a familiar scientific question.
+# 1. Present the mechanism at lower left; reserve the right half for the user's demo image.
 s = prs.slides.add_slide(prs.slide_layouts[6])
 s.background.fill.solid()
 s.background.fill.fore_color.rgb = rgb("night")
 text(s, "SCIDEMO  /  AGENT 原理 · 架构 · 开发", 0.74, 0.45, 11.9, 0.28, 12, "mint", bold=True)
-text(s, "让一句提问，变成\n可检查的求解过程", 0.72, 1.25, 7.15, 1.60, 39, "paper", bold=True, spacing=1.18)
-text(s, "模型提出动作，程序执行计算，\n结果影响下一步。", 0.77, 3.20, 6.60, 0.84, 21, "night_muted", spacing=1.25)
+text(s, "让一句提问，变成\n可检查的求解过程", 0.72, 1.25, 5.16, 1.29, 32, "paper", bold=True, spacing=1.18)
+text(s, "模型提出动作，程序执行计算，\n结果影响下一步。", 0.77, 2.91, 5.15, 0.76, 18.5, "night_muted", spacing=1.25)
 
-cycle = [(8.00, 2.02, "读目标"), (10.51, 2.02, "选工具"),
-         (10.51, 3.34, "看结果"), (8.00, 3.34, "再决定")]
+cycle = [(0.80, 4.30, "读目标"), (3.56, 4.30, "选工具"),
+         (3.56, 5.29, "看结果"), (0.80, 5.29, "再决定")]
 for x, y, label in cycle:
-    shape(s, x, y, 2.07, 0.78, "night_card", "night_line", radius=True)
-    text(s, label, x, y + 0.18, 2.07, 0.40, 22, "paper", bold=True, align=PP_ALIGN.CENTER)
-line(s, 10.15, 2.41, 10.43, 2.41, "mint", 2, arrow=True)
-line(s, 11.55, 2.90, 11.55, 3.23, "mint", 2, arrow=True)
-line(s, 10.43, 3.73, 10.15, 3.73, "mint", 2, arrow=True)
-line(s, 9.03, 3.23, 9.03, 2.90, "mint", 2, arrow=True)
-text(s, "反馈循环", 9.40, 2.92, 1.79, 0.28, 12, "mint", bold=True, align=PP_ALIGN.CENTER)
-
-shape(s, 0.75, 4.65, 11.83, 0.93, "night_card", radius=True)
-text(s, "例：求 x²−2=0 的正数解，并说明怎么检查。", 1.00, 4.90, 7.65, 0.40, 20, "paper", bold=True)
-text(s, "x ≈ 1.41421356", 9.00, 4.90, 3.29, 0.40, 23, "mint", bold=True, align=PP_ALIGN.RIGHT)
+    shape(s, x, y, 1.93, 0.55, "night_card", "night_line", radius=True)
+    text(s, label, x, y + 0.10, 1.93, 0.35, 19, "paper", bold=True, align=PP_ALIGN.CENTER)
+line(s, 2.91, 4.575, 3.38, 4.575, "mint", 1.8, arrow=True)
+line(s, 4.525, 4.96, 4.525, 5.18, "mint", 1.8, arrow=True)
+line(s, 3.38, 5.565, 2.91, 5.565, "mint", 1.8, arrow=True)
+line(s, 1.765, 5.18, 1.765, 4.96, "mint", 1.8, arrow=True)
+text(s, "反馈循环", 2.28, 4.96, 1.74, 0.26, 12, "mint", bold=True, align=PP_ALIGN.CENTER)
+demo_picture_placeholder(s, 6.25, 1.65, 6.35, 3.571875)
 parts = [(0.75, "模型决策"), (3.83, "工具执行"), (6.91, "状态记录"), (9.99, "反馈循环")]
 for i, (x, label) in enumerate(parts):
     shape(s, x, 6.10, 2.56, 0.55, "night_card", radius=True)
@@ -249,7 +283,7 @@ for x, title, desc, tech in lower:
     text(s, title, x + 0.24, 4.88, 3.29, 0.40, 24, "paper", bold=True)
     text(s, desc, x + 0.24, 5.43, 3.28, 0.28, 13.7, "night_muted")
     text(s, tech, x + 0.24, 5.85, 3.22, 0.18, 10.5, "mint")
-text(s, "部署：前端文件、后端与模型在内网；公网入口只转发请求。", 0.82, 6.38, 11.73, 0.30, 14.5, "night_muted")
+text(s, "执行进度持续呈现，工具结果与验证证据共同记录。", 0.82, 6.38, 11.73, 0.30, 14.5, "night_muted")
 text(s, "网页呈现  ·  流程协调  ·  模型与计算程序各司其职", 0.82, 6.79, 11.73, 0.22, 13.5, "mint", bold=True)
 add_notes(s, 3)
 
@@ -261,7 +295,7 @@ stages = [
     ("复杂任务处理", "扩工具、反馈参数错误，\n减少重复调用", "teal"),
     ("四角色协作", "拆分职责、增加模型复核，\n记录每次角色交接", "orange"),
     ("对话与会话体验", "多轮上下文、身份与历史，\n支持不同模型后端", "blue"),
-    ("本次部署完善", "独立管理服务与隧道，\n内网运行，公网纯转发", "teal"),
+    ("系统部署与演示", "形成完整的教学演示系统，\n部署后可对外访问", "teal"),
 ]
 stage_x = [0.72, 4.82, 8.92]
 for i, (title, desc, accent) in enumerate(stages):
@@ -280,8 +314,8 @@ shape(s, 0.74, 6.43, 11.85, 0.41, "teal_bg", radius=True)
 text(s, "开发思路：逐步增加能力，同时让每一步更可检查、更容易维护。", 0.97, 6.51, 11.38, 0.29, 16.5, "teal", bold=True, align=PP_ALIGN.CENTER)
 add_notes(s, 4)
 
-# 5. Separate implemented safeguards from future work.
-s = base(5, "设计取舍与下一步", "自主性，需要证据与边界", "先明确现有设计，再把下一步要完善的内容说清楚。", True)
+# 5. Share design experience and leave an editable place for the presentation link.
+s = base(5, "设计经验分享", "自主性，需要证据与边界", "把动作边界、验证证据和执行过程一起设计。", True)
 principles = [("允许做什么？", "工具白名单与参数校验"),
               ("结果凭什么？", "程序检查与模型复核"),
               ("过程怎么看？", "共享状态与执行事件")]
@@ -290,22 +324,24 @@ for i, (question, answer) in enumerate(principles):
     shape(s, x, 2.30, 3.69, 1.23, "night_card", "night_line", radius=True)
     text(s, question, x + 0.24, 2.52, 3.21, 0.36, 21, "paper", bold=True)
     text(s, answer, x + 0.24, 3.07, 3.21, 0.29, 15.2, "mint")
-text(s, "下一步，优先完善三件事", 0.78, 3.92, 11.78, 0.36, 21, "paper", bold=True)
-for label, x, width in [("方向", 0.82, 2.12), ("当前边界", 3.18, 4.23), ("改进方向", 7.88, 4.46)]:
-    text(s, label, x, 4.49, width, 0.25, 12.8, "night_muted", bold=True)
-line(s, 0.78, 4.82, 12.55, 4.82, "night_line", 1.0)
-improvements = [
-    ("完成条件", "目标提示不硬性保证全部完成", "把需求变成可核对的验收项"),
-    ("验证覆盖", "部分工具仅做基础检查", "加强交叉验证与反例测试"),
-    ("任务恢复", "运行任务仍有内存状态", "持久化检查点与恢复流程"),
+text(s, "开发经验", 0.78, 3.93, 11.78, 0.36, 21, "paper", bold=True)
+experiences = [
+    ("先跑通闭环", "连接一次计算、检查与解释，再逐步增加自主性。"),
+    ("按职责分工", "角色可以共用模型，通过明确职责与共享记录协作。"),
+    ("记录完整过程", "留下工具输入、执行结果与验证证据，让过程能被检查。"),
 ]
-for i, (area, limitation, future) in enumerate(improvements):
-    y = 4.98 + i * 0.54
-    text(s, area, 0.82, y, 2.12, 0.32, 17.0, "paper", bold=True)
-    text(s, limitation, 3.18, y + 0.025, 4.25, 0.28, 14.2, "night_muted")
-    text(s, future, 7.88, y + 0.025, 4.45, 0.28, 14.2, "mint")
-    line(s, 0.78, y + 0.40, 12.55, y + 0.40, "night_line", 0.6)
-text(s, "把自主决策与可检查的程序边界一起设计。", 0.81, 6.67, 11.75, 0.29, 16, "mint", bold=True)
+for i, (title, detail) in enumerate(experiences):
+    y = 4.45 + i * 0.52
+    text(s, title, 0.82, y, 2.54, 0.32, 17, "paper", bold=True)
+    text(s, detail, 3.49, y + 0.02, 8.73, 0.30, 14.4, "night_muted")
+    line(s, 0.80, y + 0.40, 12.53, y + 0.40, "night_line", 0.6)
+shape(s, 0.76, 6.16, 11.80, 0.66, "night_card", "night_line", radius=True)
+text(s, "项目展示", 1.01, 6.33, 2.10, 0.33, 19, "paper", bold=True)
+demo_link = text(s, "在此填写展示链接", 3.12, 6.34, 9.09, 0.33, 18, "mint")
+demo_link.name = "项目展示链接（可编辑文本）"
+for paragraph in demo_link.text_frame.paragraphs:
+    for run in paragraph.runs:
+        run.font.underline = True
 add_notes(s, 5)
 
 
@@ -329,7 +365,9 @@ for page, slide in enumerate(prs.slides, 1):
 prs.save(PPTX)
 manifest = {"slides": 5, "outline": OUTLINE.name, "outline_sha256": hashlib.sha256(OUTLINE.read_bytes()).hexdigest(),
             "presentation": PPTX.name, "editable": True, "speaker_notes": True, "font": FONT,
-            "topics": ["项目原理", "四角色协作", "系统架构", "开发演进", "设计取舍与改进"]}
+            "topics": ["项目原理", "四角色协作", "系统架构", "开发演进", "设计经验分享"],
+            "demo_image_placeholder": "第1页右侧原生图片占位框，16:9",
+            "demo_link_placeholder": "第5页底部可编辑文字链接区"}
 (HERE / "build_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 print(f"Created {PPTX} ({len(prs.slides)} slides)")
 
